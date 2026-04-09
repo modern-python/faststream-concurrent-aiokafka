@@ -25,7 +25,6 @@ class MockAsyncioTask:
         return self._result
 
 
-
 class MockKafkaBatchCommitter:
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         self.send_task = AsyncMock()
