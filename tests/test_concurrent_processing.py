@@ -328,7 +328,9 @@ async def test_concurrent_keeps_running_tasks(handler: KafkaConcurrentHandler) -
         await task
 
 
-async def test_concurrent_releases_limiter_for_done_tasks(handler_with_limit: KafkaConcurrentHandler) -> None:
+async def test_concurrent_health_check_discards_done_tasks_without_releasing_limiter(
+    handler_with_limit: KafkaConcurrentHandler,
+) -> None:
     handler: typing.Final = handler_with_limit
 
     async def quick_task() -> str:
@@ -340,8 +342,9 @@ async def test_concurrent_releases_limiter_for_done_tasks(handler_with_limit: Ka
     assert handler.limiter
     initial_value: typing.Final = handler.limiter._value
     await handler._check_tasks_health()
+    assert task not in handler._current_tasks
     assert handler.limiter
-    assert handler.limiter._value == initial_value + 1
+    assert handler.limiter._value == initial_value  # limiter released only by _finish_task callback
 
 
 async def test_concurrent_logs_found_tasks(handler: KafkaConcurrentHandler, caplog: pytest.LogCaptureFixture) -> None:

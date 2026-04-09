@@ -29,9 +29,7 @@ app = FastStream(broker)
 async def on_startup(context: ContextRepo) -> None:
     await initialize_concurrent_processing(
         context=context,
-        concurrency_limit=20,       # max concurrent tasks (0 = unlimited)
-        commit_batch_size=100,      # commit after this many messages
-        commit_batch_timeout_sec=5, # or after this many seconds
+        concurrency_limit=20,  # max concurrent tasks (0 = unlimited)
     )
 
 
@@ -64,7 +62,16 @@ With batch commit enabled, offsets are committed per partition at the highest co
 
 ## Consumer group filtering
 
-When multiple consumer groups share a topic, messages can be tagged with a `topic_group` header. The middleware will only process messages whose `topic_group` header matches the consumer's group ID, skipping the rest.
+When multiple consumer groups subscribe to the same topic, producers can tag messages with a `topic_group` header to direct them to a specific group. The middleware skips messages whose `topic_group` header doesn't match the consumer's group ID. Messages with no `topic_group` header are always processed.
+
+```python
+# Producer side — send to a specific consumer group only
+await broker.publish(
+    {"data": "..."},
+    topic="my-topic",
+    headers={"topic_group": "group-a"},
+)
+```
 
 ## Parameters
 
