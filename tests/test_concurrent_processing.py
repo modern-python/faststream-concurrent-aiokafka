@@ -11,35 +11,12 @@ import pytest_asyncio
 
 from faststream_concurrent_aiokafka.batch_committer import CommitterIsDeadError
 from faststream_concurrent_aiokafka.processing import KafkaConcurrentHandler
-from tests.mocks import MockAIOKafkaConsumer, MockKafkaBatchCommitter
-
-
-class MockKafkaMessage:
-    def __init__(
-        self,
-        topic: str = "test-topic",
-        partition: int = 0,
-        offset: int = 100,
-        headers: dict[str, str] | None = None,
-        group_id: str = "test-group",
-    ) -> None:
-        self.topic = topic
-        self.partition = partition
-        self.offset = offset
-        self.headers = headers or {}
-        self.consumer = MockAIOKafkaConsumer(group_id)
-
-
-class MockConsumerRecord:
-    def __init__(self, topic: str = "test-topic", partition: int = 0, offset: int = 100) -> None:
-        self.topic = topic
-        self.partition = partition
-        self.offset = offset
+from tests.mocks import MockConsumerRecord, MockKafkaBatchCommitter, MockKafkaMessage
 
 
 @pytest_asyncio.fixture
 async def handler() -> typing.AsyncIterator[KafkaConcurrentHandler]:
-    handler: typing.Final = KafkaConcurrentHandler(concurrency_limit=0)
+    handler: typing.Final = KafkaConcurrentHandler(committer=MockKafkaBatchCommitter())  # ty: ignore[invalid-argument-type]
     yield handler
     if handler._is_running:
         await handler.stop()
@@ -55,7 +32,7 @@ async def handler_with_committer() -> typing.AsyncIterator[KafkaConcurrentHandle
 
 @pytest_asyncio.fixture
 async def handler_with_limit() -> typing.AsyncIterator[KafkaConcurrentHandler]:
-    h: typing.Final = KafkaConcurrentHandler(concurrency_limit=2)
+    h: typing.Final = KafkaConcurrentHandler(committer=MockKafkaBatchCommitter(), concurrency_limit=2)  # ty: ignore[invalid-argument-type]
     yield h
 
 
@@ -69,55 +46,27 @@ def sample_record() -> MockConsumerRecord:
     return MockConsumerRecord()
 
 
-def test_concurrent_init_without_concurrency_limit() -> None:
-    obj: typing.Final = KafkaConcurrentHandler(concurrency_limit=0)
-    assert obj.limiter is None
+def test_concurrent_init_zero_concurrency_limit_raises() -> None:
+    with pytest.raises(ValueError, match="concurrency_limit must be >= 1"):
+        KafkaConcurrentHandler(committer=MockKafkaBatchCommitter(), concurrency_limit=0)  # ty: ignore[invalid-argument-type]
 
 
-def test_concurrent_init_with_zero_concurrency_limit() -> None:
-    obj: typing.Final = KafkaConcurrentHandler(concurrency_limit=0)
-    assert obj.limiter is None
-
-
-def test_concurrent_process_when_no_header(handler: KafkaConcurrentHandler, sample_message: MockKafkaMessage) -> None:
-    sample_message.headers = {}
-    result: typing.Final = handler._is_need_to_process_message(sample_message)  # ty: ignore[invalid-argument-type]
-    assert result is True
-
-
-def test_concurrent_process_when_header_matches_group(
-    handler: KafkaConcurrentHandler, sample_message: MockKafkaMessage
-) -> None:
-    sample_message.headers = {"topic_group": "test-group"}
-    result: typing.Final = handler._is_need_to_process_message(sample_message)  # ty: ignore[invalid-argument-type]
-    assert result is True
-
-
-def test_concurrent_skip_when_header_differs(handler: KafkaConcurrentHandler, sample_message: MockKafkaMessage) -> None:
-    sample_message.headers = {"topic_group": "other-group"}
-    result: typing.Final = handler._is_need_to_process_message(sample_message)  # ty: ignore[invalid-argument-type]
-    assert result is False
-
-
-def test_concurrent_process_when_no_consumer_group(
-    handler: KafkaConcurrentHandler, sample_message: MockKafkaMessage
-) -> None:
-    sample_message.consumer._group_id = ""
-    sample_message.headers = {"topic_group": "some-group"}
-    result: typing.Final = handler._is_need_to_process_message(sample_message)  # ty: ignore[invalid-argument-type]
-    assert result is False
+def test_concurrent_init_negative_concurrency_limit_raises() -> None:
+    with pytest.raises(ValueError, match="concurrency_limit must be >= 1"):
+        KafkaConcurrentHandler(committer=MockKafkaBatchCommitter(), concurrency_limit=-1)  # ty: ignore[invalid-argument-type]
 
 
 async def test_concurrent_releases_limiter_on_completion(handler_with_limit: KafkaConcurrentHandler) -> None:
     expected_value: typing.Final = 2
 
-    assert handler_with_limit.limiter
-    await handler_with_limit.limiter.acquire()
-    assert handler_with_limit.limiter._value == 1
+    assert handler_with_limit._limiter
+    await handler_with_limit._limiter.acquire()
+    assert handler_with_limit._limiter._value == 1
     mock_task: typing.Final = MagicMock()
+    mock_task.cancelled.return_value = False
     mock_task.exception.return_value = None
     handler_with_limit._finish_task(mock_task)
-    assert handler_with_limit.limiter._value == expected_value
+    assert handler_with_limit._limiter._value == expected_value
 
 
 async def test_concurrent_failed_task_exception(
@@ -126,6 +75,7 @@ async def test_concurrent_failed_task_exception(
     caplog.set_level(logging.ERROR)
 
     mock_task: typing.Final = MagicMock()
+    mock_task.cancelled.return_value = False
     mock_task.exception.return_value = ValueError("Task failed")
     handler_with_limit._finish_task(mock_task)
     assert "Task has failed with the exception" in caplog.text
@@ -133,16 +83,11 @@ async def test_concurrent_failed_task_exception(
 
 async def test_concurrent_removes_task_from_set(handler: KafkaConcurrentHandler) -> None:
     mock_task: typing.Final = MagicMock()
+    mock_task.cancelled.return_value = False
     mock_task.exception.return_value = None
     handler._current_tasks.add(mock_task)
     handler._finish_task(mock_task)
     assert mock_task not in handler._current_tasks
-
-
-async def test_concurrent_no_limiter_release_when_no_limiter(handler: KafkaConcurrentHandler) -> None:
-    mock_task: typing.Final = MagicMock()
-    mock_task.exception.return_value = None
-    handler._finish_task(mock_task)
 
 
 async def test_concurrent_creates_task(
@@ -186,21 +131,8 @@ async def test_concurrent_acquires_limiter_when_limited(
         return "result"
 
     await handler_with_limit.handle_task(coro(), sample_record, sample_message)  # ty: ignore[invalid-argument-type]
-    assert handler_with_limit.limiter
-    assert handler_with_limit.limiter._value == 1
-
-
-async def test_concurrent_skips_processing_when_filtered(
-    handler_with_limit: KafkaConcurrentHandler, sample_message: MockKafkaMessage, sample_record: MockConsumerRecord
-) -> None:
-    expected_value: typing.Final = 2
-    sample_message.headers = {"topic_group": "other-group"}
-
-    await handler_with_limit.handle_task(asyncio.sleep(10), sample_record, sample_message)  # ty: ignore[invalid-argument-type]
-
-    assert len(handler_with_limit._current_tasks) == 0
-    assert handler_with_limit.limiter
-    assert handler_with_limit.limiter._value == expected_value
+    assert handler_with_limit._limiter
+    assert handler_with_limit._limiter._value == 1
 
 
 async def test_concurrent_sends_to_committer_when_enabled(
@@ -233,18 +165,6 @@ async def test_concurrent_handles_committer_dead_error(
     assert not handler._is_running
 
 
-async def test_concurrent_no_committer_when_disabled(
-    handler: KafkaConcurrentHandler, sample_message: MockKafkaMessage, sample_record: MockConsumerRecord
-) -> None:
-    await handler.start()
-
-    async def coro() -> str:
-        return "result"
-
-    await handler.handle_task(coro(), sample_record, sample_message)  # ty: ignore[invalid-argument-type]
-    assert handler._committer is None
-
-
 async def test_concurrent_removes_completed_tasks(handler: KafkaConcurrentHandler) -> None:
     task: typing.Final = asyncio.create_task(asyncio.sleep(0.1))
     await task
@@ -274,12 +194,12 @@ async def test_concurrent_health_check_discards_done_tasks_without_releasing_lim
     task: typing.Final = asyncio.create_task(quick_task())
     handler._current_tasks.add(task)
     await asyncio.sleep(0)
-    assert handler.limiter
-    initial_value: typing.Final = handler.limiter._value
+    assert handler._limiter
+    initial_value: typing.Final = handler._limiter._value
     await handler._check_tasks_health()
     assert task not in handler._current_tasks
-    assert handler.limiter
-    assert handler.limiter._value == initial_value  # limiter released only by _finish_task callback
+    assert handler._limiter
+    assert handler._limiter._value == initial_value  # limiter released only by _finish_task callback
 
 
 async def test_concurrent_logs_found_tasks(handler: KafkaConcurrentHandler, caplog: pytest.LogCaptureFixture) -> None:
@@ -474,6 +394,18 @@ async def test_concurrent_logs_timeout(handler: KafkaConcurrentHandler, caplog: 
         assert "haven't finished in graceful time" in caplog.text
 
 
+async def test_concurrent_finish_task_does_not_crash_on_cancelled_task(
+    handler_with_limit: KafkaConcurrentHandler,
+) -> None:
+    task: typing.Final = asyncio.create_task(asyncio.sleep(10))
+    handler_with_limit._current_tasks.add(task)
+    task.add_done_callback(handler_with_limit._finish_task)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert task not in handler_with_limit._current_tasks
+
+
 async def test_concurrent_cancels_all_tasks(handler: KafkaConcurrentHandler) -> None:
     task1: typing.Final = asyncio.create_task(asyncio.sleep(10))
     task2: typing.Final = asyncio.create_task(asyncio.sleep(10))
@@ -529,7 +461,7 @@ async def test_concurrent_full_lifecycle() -> None:
 
 async def test_concurrent_message_processing() -> None:
     target_value: typing.Final = 5
-    handler: typing.Final = KafkaConcurrentHandler(concurrency_limit=target_value)
+    handler: typing.Final = KafkaConcurrentHandler(committer=MockKafkaBatchCommitter(), concurrency_limit=target_value)  # ty: ignore[invalid-argument-type]
     await handler.start()
 
     start_times: typing.Final = []
@@ -556,7 +488,7 @@ async def test_concurrent_message_processing() -> None:
 
 
 async def test_concurrent_signal_handling_integration() -> None:
-    handler: typing.Final = KafkaConcurrentHandler()
+    handler: typing.Final = KafkaConcurrentHandler(committer=MockKafkaBatchCommitter())  # ty: ignore[invalid-argument-type]
     await handler.start()
 
     handler._signal_handler(signal.SIGTERM)

@@ -15,7 +15,6 @@ from faststream_concurrent_aiokafka.batch_committer import KafkaBatchCommitter
 logger = logging.getLogger(__name__)
 
 
-TOPIC_GROUP_KEY: typing.Final = "topic_group"
 SIGNALS: typing.Final = (signal.SIGTERM, signal.SIGINT, signal.SIGQUIT)
 GRACEFUL_TIMEOUT_SEC: typing.Final[int] = 10
 DEFAULT_OBSERVER_INTERVAL_SEC: typing.Final[float] = 5.0
@@ -25,11 +24,15 @@ DEFAULT_CONCURRENCY_LIMIT: typing.Final = 10
 class KafkaConcurrentHandler:
     def __init__(
         self,
+        committer: KafkaBatchCommitter,
         concurrency_limit: int = DEFAULT_CONCURRENCY_LIMIT,
-        committer: KafkaBatchCommitter | None = None,
         observer_interval: float = DEFAULT_OBSERVER_INTERVAL_SEC,
     ) -> None:
-        self.limiter = asyncio.Semaphore(concurrency_limit) if concurrency_limit != 0 else None
+        if concurrency_limit < 1:
+            msg = f"concurrency_limit must be >= 1, got {concurrency_limit}"
+            raise ValueError(msg)
+
+        self._limiter = asyncio.Semaphore(concurrency_limit)
         self._current_tasks: set[asyncio.Task[typing.Any]] = set()
 
         self._observer_task: asyncio.Task[typing.Any] | None = None
@@ -37,13 +40,8 @@ class KafkaConcurrentHandler:
         self._observer_interval: float = observer_interval
         self._is_running: bool = False
 
-        self._committer: KafkaBatchCommitter | None = committer
+        self._committer: KafkaBatchCommitter = committer
         self._stop_task: asyncio.Task[typing.Any] | None = None
-
-    def _is_need_to_process_message(self, message: KafkaAckableMessage) -> bool:
-        headers_topic_group: typing.Final[str | None] = message.headers.get(TOPIC_GROUP_KEY)
-        group_id: typing.Final[str] = getattr(message.consumer, "_group_id", "")
-        return headers_topic_group is None or headers_topic_group == group_id
 
     async def wait_for_subtasks(self) -> None:
         logger.info("Kafka middleware. Gracefully waiting for tasks to end...")
@@ -53,11 +51,11 @@ class KafkaConcurrentHandler:
             logger.exception("Kafka middleware. Whoops, some tasks haven't finished in graceful time, sorry")
 
     def _finish_task(self, task: asyncio.Task[typing.Any]) -> None:
-        if self.limiter:
-            self.limiter.release()
-        exc: typing.Final[BaseException | None] = task.exception()
-        if exc:
-            logger.error("Kafka middleware. Task has failed with the exception", exc_info=exc)
+        self._limiter.release()
+        if not task.cancelled():
+            exc: typing.Final[BaseException | None] = task.exception()
+            if exc:
+                logger.error("Kafka middleware. Task has failed with the exception", exc_info=exc)
         self._current_tasks.discard(task)
 
     async def handle_task(
@@ -66,38 +64,30 @@ class KafkaConcurrentHandler:
         record: ConsumerRecord,
         kafka_message: KafkaAckableMessage,
     ) -> None:
-        if not self._is_need_to_process_message(kafka_message):
-            coroutine.close()
-            return
-        if self.limiter:
-            await self.limiter.acquire()
+        if self._limiter:
+            await self._limiter.acquire()
         task: typing.Final = asyncio.create_task(coroutine)
         self._current_tasks.add(task)
         task.add_done_callback(self._finish_task)
-        if self._committer:
-            try:
-                await self._committer.send_task(
-                    batch_committer.KafkaCommitTask(
-                        asyncio_task=task,
-                        offset=record.offset,
-                        consumer=kafka_message.consumer,
-                        topic_partition=TopicPartition(topic=record.topic, partition=record.partition),
-                    )
+        try:
+            await self._committer.send_task(
+                batch_committer.KafkaCommitTask(
+                    asyncio_task=task,
+                    offset=record.offset,
+                    consumer=kafka_message.consumer,
+                    topic_partition=TopicPartition(topic=record.topic, partition=record.partition),
                 )
-            except batch_committer.CommitterIsDeadError:
-                logger.exception("Kafka middleware. Committer is dead")
-                await self.stop()
-                raise
+            )
+        except batch_committer.CommitterIsDeadError:
+            logger.exception("Kafka middleware. Committer is dead")
+            await self.stop()
+            raise
 
     async def _check_tasks_health(self) -> None:
-        to_discard: typing.Final = []
-        for task in self._current_tasks:
-            if task.done():
-                to_discard.append(task)
-        for task in to_discard:
-            self._current_tasks.discard(task)
-        if to_discard:
-            logger.info(f"Kafka middleware. Found completed but not discarded tasks, amount: {len(to_discard)}")
+        done_tasks: typing.Final = {t for t in self._current_tasks if t.done()}
+        self._current_tasks -= done_tasks
+        if done_tasks:
+            logger.info(f"Kafka middleware. Found completed but not discarded tasks, amount: {len(done_tasks)}")
 
     async def observer(self) -> None:
         """Background observer task that monitors system health."""
@@ -128,12 +118,12 @@ class KafkaConcurrentHandler:
     async def start(self) -> None:
         if self._is_running:
             return
+
         logger.info("Kafka middleware. Start middleware handler")
         self._is_running = True
         self._shutdown_event.clear()
 
-        if self._committer:
-            self._committer.spawn()
+        self._committer.spawn()
         self._observer_task = asyncio.create_task(self.observer())
         self._setup_signal_handlers()
         logger.info("Kafka middleware is ready to process messages.")
@@ -145,8 +135,7 @@ class KafkaConcurrentHandler:
         self._is_running = False
         self._shutdown_event.set()
 
-        if self._committer:
-            await self._committer.close()
+        await self._committer.close()
         if self._observer_task and not self._observer_task.done():
             self._observer_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -154,34 +143,33 @@ class KafkaConcurrentHandler:
         await self.wait_for_subtasks()
 
         try:
-            loop: typing.Final = asyncio.get_running_loop()
+            loop = asyncio.get_running_loop()
             for sig in SIGNALS:
                 loop.remove_signal_handler(sig)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"Kafka middleware. Exception raised: {exc}")
+        except Exception:  # noqa: BLE001
+            logger.warning("Kafka middleware. Exception raised while removing signal handlers", exc_info=True)
         logger.info("Kafka middleware. Complete shutting down middleware handler")
 
     async def force_cancel_all(self) -> None:
         logger.warning("Kafka middleware. Force cancelling all tasks!")
         self._is_running = False
 
-        for task in self._current_tasks:
+        tasks = list(self._current_tasks)
+        for task in tasks:
             task.cancel()
         if self._observer_task and not self._observer_task.done():
             self._observer_task.cancel()
-        await asyncio.sleep(0.5)
+        await asyncio.gather(*tasks, return_exceptions=True)
         self._current_tasks.clear()
 
     @property
-    def has_batch_commit(self) -> bool:
-        return self._committer is not None
-
-    @property
     def is_healthy(self) -> bool:
-        status = self._is_running and self._observer_task is not None and not self._observer_task.done()
-        if self._committer:
-            status = status and self._committer.is_healthy
-        return status
+        return (
+            self._is_running
+            and self._observer_task is not None
+            and not self._observer_task.done()
+            and self._committer.is_healthy
+        )
 
     @property
     def is_running(self) -> bool:

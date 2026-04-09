@@ -2,7 +2,7 @@
 import asyncio
 import logging
 import typing
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -134,46 +134,6 @@ async def test_middleware_handler_context_instance_stable(setup_broker: KafkaBro
     assert len(processed) == 3
 
 
-async def test_middleware_message_filtering_by_group_header(setup_broker: KafkaBroker) -> None:
-    processed: typing.Final = []
-    first_id: typing.Final = 1
-    second_id: typing.Final = 2
-    third_id: typing.Final = 3
-    expected_size: typing.Final = 2
-
-    @setup_broker.subscriber("filtered-topic", group_id="target-group")
-    async def handler(msg: typing.Any) -> None:
-        processed.append(msg)
-
-    async with TestKafkaBroker(setup_broker) as test_broker:
-        hdl: typing.Final = await initialize_concurrent_processing(
-            context=test_broker.context,
-            commit_batch_size=10,
-            commit_batch_timeout_sec=5,
-            concurrency_limit=5,
-        )
-
-        try:
-            await test_broker.publish(
-                {"id": first_id},
-                topic="filtered-topic",
-                headers={"my_stuff": "some stuff"},
-            )
-            await test_broker.publish(
-                {"id": second_id},
-                topic="filtered-topic",
-                headers={"topic_group": "target-group"},
-            )
-            await test_broker.publish({"id": third_id}, topic="filtered-topic")
-            await hdl.wait_for_subtasks()
-        finally:
-            await stop_concurrent_processing(test_broker.context)
-
-    assert len(processed) == expected_size
-    assert processed[0]["id"] == first_id
-    assert processed[1]["id"] == third_id
-
-
 async def test_middleware_initialize_start_failure_raises(setup_broker: KafkaBroker) -> None:
     with patch.object(KafkaConcurrentHandler, "start", side_effect=Exception("Start failed")):
         async with TestKafkaBroker(setup_broker) as test_broker:
@@ -208,9 +168,7 @@ async def test_middleware_initialize_skips_when_already_running(
         await stop_concurrent_processing(test_broker.context)
 
 
-async def test_middleware_unhealthy_handler_raises(setup_broker: KafkaBroker, caplog: pytest.LogCaptureFixture) -> None:
-    caplog.set_level(logging.ERROR)
-
+async def test_middleware_unhealthy_handler_raises(setup_broker: KafkaBroker) -> None:
     @setup_broker.subscriber("unhealthy-topic", group_id="unhealthy-group")
     async def handler(msg: typing.Any) -> None:
         pass  # pragma: no cover
@@ -224,17 +182,14 @@ async def test_middleware_unhealthy_handler_raises(setup_broker: KafkaBroker, ca
 
         handler_instance._is_running = False
 
-        with pytest.raises(RuntimeError, match="Concurrent processing is not running"):
+        with pytest.raises(RuntimeError, match="Call `initialize_concurrent_processing`"):
             await test_broker.publish({"id": 1}, topic="unhealthy-topic")
 
         await asyncio.sleep(0)
         await stop_concurrent_processing(test_broker.context)
 
 
-async def test_middleware_no_kafka_message_with_batch_processing_raises(
-    setup_broker: KafkaBroker, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level(logging.ERROR)
+async def test_middleware_no_kafka_message_with_batch_processing_raises(setup_broker: KafkaBroker) -> None:
 
     @setup_broker.subscriber("no-kafka-msg-topic", group_id="no-kafka-msg-group")
     async def handler(msg: typing.Any) -> None:
@@ -256,24 +211,50 @@ async def test_middleware_no_kafka_message_with_batch_processing_raises(
 
         test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
 
-        with pytest.raises(RuntimeError, match="No kafka message in the middleware"):
+        with pytest.raises(RuntimeError, match="No Kafka message found in context"):
             await test_broker.publish({"id": 1}, topic="no-kafka-msg-topic")
 
         await asyncio.sleep(0)
         await stop_concurrent_processing(test_broker.context)
 
 
-async def test_middleware_no_handler_in_context_raises(
-    setup_broker: KafkaBroker, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level(logging.ERROR)
+async def test_middleware_raises_if_auto_commit_enabled(setup_broker: KafkaBroker) -> None:
+    @setup_broker.subscriber("auto-commit-topic", group_id="auto-commit-group")
+    async def handler(msg: typing.Any) -> None:
+        pass  # pragma: no cover
 
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        await initialize_concurrent_processing(
+            context=test_broker.context,
+            commit_batch_size=10,
+            commit_batch_timeout_sec=5,
+        )
+
+        original_get: typing.Final = test_broker.context.get
+
+        def mock_get(key: str, default: typing.Any = None) -> typing.Any:
+            if key == "message":
+                mock_msg = MagicMock()
+                mock_msg.consumer._enable_auto_commit = True
+                return mock_msg
+            return original_get(key, default)
+
+        test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
+
+        with pytest.raises(RuntimeError, match=r"ack_policy=AckPolicy.MANUAL"):
+            await test_broker.publish({"id": 1}, topic="auto-commit-topic")
+
+        await asyncio.sleep(0)
+        await stop_concurrent_processing(test_broker.context)
+
+
+async def test_middleware_no_handler_in_context_raises(setup_broker: KafkaBroker) -> None:
     @setup_broker.subscriber("no-handler-topic", group_id="no-handler-group")
     async def handler(msg: typing.Any) -> None:
         pass  # pragma: no cover
 
     async with TestKafkaBroker(setup_broker) as test_broker:
-        with pytest.raises(RuntimeError, match="No concurrent processing instance in the context"):
+        with pytest.raises(RuntimeError, match="Call `initialize_concurrent_processing`"):
             await test_broker.publish({"id": 1}, topic="no-handler-topic")
 
 
@@ -409,7 +390,7 @@ async def test_middleware_general_exception_wrapped(
             KafkaConcurrentHandler, "handle_task", side_effect=MemoryError("Out of memory in handle_task")
         ):
             try:
-                with pytest.raises(RuntimeError, match=r"Kafka middleware. An error while sending task"):
+                with pytest.raises(MemoryError, match="Out of memory in handle_task"):
                     await test_broker.publish({"id": 1}, topic="general-error-topic")
             finally:
                 await stop_concurrent_processing(test_broker.context)
