@@ -42,7 +42,6 @@ dev = [
 lint = [
     "ruff",
     "ty",
-    "auto-typing-final",
     "eof-fixer"
 ]
 
@@ -78,7 +77,8 @@ isort.no-lines-before = ["standard-library", "local-folder"]
 
 [tool.ruff.lint.extend-per-file-ignores]
 "tests/*.py" = [
-    "S101", # allow asserts
+    "S101",    # allow asserts
+    "PLR2004", # allow magic values in test assertions
 ]
 
 [tool.pytest.ini_options]

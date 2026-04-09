@@ -39,43 +39,24 @@ class MockConsumerRecord:
 
 @pytest_asyncio.fixture
 async def handler() -> typing.AsyncIterator[KafkaConcurrentHandler]:
-    with patch(
-        "faststream_concurrent_aiokafka.processing.KafkaBatchCommitter",
-        MockKafkaBatchCommitter,
-    ):
-        handler: typing.Final = KafkaConcurrentHandler(
-            enable_batch_commit=False,
-            concurrency_limit=0,
-        )
-        yield handler
-        if handler._is_running:
-            await handler.stop()
+    handler: typing.Final = KafkaConcurrentHandler(concurrency_limit=0)
+    yield handler
+    if handler._is_running:
+        await handler.stop()
 
 
 @pytest_asyncio.fixture
 async def handler_with_committer() -> typing.AsyncIterator[KafkaConcurrentHandler]:
-    with patch(
-        "faststream_concurrent_aiokafka.processing.KafkaBatchCommitter",
-        MockKafkaBatchCommitter,
-    ):
-        h: typing.Final = KafkaConcurrentHandler(
-            enable_batch_commit=True,
-            commit_batch_timeout_sec=5,
-            commit_batch_size=10,
-        )
-        yield h
-        if h._is_running:
-            await h.stop()
+    h: typing.Final = KafkaConcurrentHandler(committer=MockKafkaBatchCommitter())  # ty: ignore[invalid-argument-type]
+    yield h
+    if h._is_running:
+        await h.stop()
 
 
 @pytest_asyncio.fixture
 async def handler_with_limit() -> typing.AsyncIterator[KafkaConcurrentHandler]:
-    with patch(
-        "faststream_concurrent_aiokafka.processing.KafkaBatchCommitter",
-        MockKafkaBatchCommitter,
-    ):
-        h: typing.Final = KafkaConcurrentHandler(concurrency_limit=2)
-        yield h
+    h: typing.Final = KafkaConcurrentHandler(concurrency_limit=2)
+    yield h
 
 
 @pytest.fixture
@@ -86,25 +67,6 @@ def sample_message() -> MockKafkaMessage:
 @pytest.fixture
 def sample_record() -> MockConsumerRecord:
     return MockConsumerRecord()
-
-
-def test_concurrent_singleton_same_instance() -> None:
-    h1: typing.Final = KafkaConcurrentHandler()
-    h2: typing.Final = KafkaConcurrentHandler()
-
-    assert h1 is h2
-
-
-def test_concurrent_init_called_several_times() -> None:
-    expected: typing.Final = 5
-    first: typing.Final = KafkaConcurrentHandler(concurrency_limit=expected)
-    second: typing.Final = KafkaConcurrentHandler(concurrency_limit=expected * 2)
-
-    assert second is first
-    assert first.limiter
-    assert second.limiter
-    assert isinstance(first.limiter, asyncio.Semaphore)
-    assert first.limiter is second.limiter
 
 
 def test_concurrent_init_without_concurrency_limit() -> None:
@@ -541,75 +503,63 @@ async def test_concurrent_cancels_observer(handler: KafkaConcurrentHandler, capl
 
 
 async def test_concurrent_full_lifecycle() -> None:
-    with patch(
-        "faststream_concurrent_aiokafka.batch_committer.KafkaBatchCommitter",
-        MockKafkaBatchCommitter,
-    ):
-        handler: typing.Final = KafkaConcurrentHandler(enable_batch_commit=True, concurrency_limit=2)
+    handler: typing.Final = KafkaConcurrentHandler(committer=MockKafkaBatchCommitter(), concurrency_limit=2)  # ty: ignore[invalid-argument-type]
 
-        await handler.start()
-        assert handler.is_healthy
+    await handler.start()
+    assert handler.is_healthy
 
-        processed: typing.Final = []
+    processed: typing.Final = []
 
-        async def process_msg(msg_id: int) -> None:
-            await asyncio.sleep(0.01)
-            processed.append(msg_id)
+    async def process_msg(msg_id: int) -> None:
+        await asyncio.sleep(0.01)
+        processed.append(msg_id)
 
-        msg: typing.Final = MockKafkaMessage()
-        record: typing.Final = MockConsumerRecord()
+    msg: typing.Final = MockKafkaMessage()
+    record: typing.Final = MockConsumerRecord()
 
-        for i in range(5):
-            await handler.handle_task(process_msg(i), record, msg)  # ty: ignore[invalid-argument-type]
+    for i in range(5):
+        await handler.handle_task(process_msg(i), record, msg)  # ty: ignore[invalid-argument-type]
 
-        await handler.wait_for_subtasks()
-        await handler.stop()
+    await handler.wait_for_subtasks()
+    await handler.stop()
 
-        assert not handler.is_running
-        assert len(processed) > 0
+    assert not handler.is_running
+    assert len(processed) > 0
 
 
 async def test_concurrent_message_processing() -> None:
     target_value: typing.Final = 5
-    with patch(
-        "faststream_concurrent_aiokafka.batch_committer.KafkaBatchCommitter",
-        MockKafkaBatchCommitter,
-    ):
-        handler: typing.Final = KafkaConcurrentHandler(concurrency_limit=target_value)
-        await handler.start()
+    handler: typing.Final = KafkaConcurrentHandler(concurrency_limit=target_value)
+    await handler.start()
 
-        start_times: typing.Final = []
-        end_times: typing.Final = []
+    start_times: typing.Final = []
+    end_times: typing.Final = []
 
-        async def tracked_task(idx: int) -> None:
-            start_times.append((idx, asyncio.get_event_loop().time()))
-            await asyncio.sleep(0.05)
-            end_times.append((idx, asyncio.get_event_loop().time()))
+    async def tracked_task(idx: int) -> None:
+        start_times.append((idx, asyncio.get_event_loop().time()))
+        await asyncio.sleep(0.05)
+        end_times.append((idx, asyncio.get_event_loop().time()))
 
-        msg: typing.Final = MockKafkaMessage()
-        record: typing.Final = MockConsumerRecord()
+    msg: typing.Final = MockKafkaMessage()
+    record: typing.Final = MockConsumerRecord()
 
-        for i in range(target_value):
-            await handler.handle_task(tracked_task(i), record, msg)  # ty: ignore[invalid-argument-type]
+    for i in range(target_value):
+        await handler.handle_task(tracked_task(i), record, msg)  # ty: ignore[invalid-argument-type]
 
-        await handler.wait_for_subtasks()
-        await handler.stop()
+    await handler.wait_for_subtasks()
+    await handler.stop()
 
-        if len(start_times) == target_value and len(end_times) == target_value:
-            max_start: typing.Final = max(t for _, t in start_times)
-            min_end: typing.Final = min(t for _, t in end_times)
-            assert max_start < min_end
+    if len(start_times) == target_value and len(end_times) == target_value:
+        max_start: typing.Final = max(t for _, t in start_times)
+        min_end: typing.Final = min(t for _, t in end_times)
+        assert max_start < min_end
 
 
 async def test_concurrent_signal_handling_integration() -> None:
-    with patch(
-        "faststream_concurrent_aiokafka.batch_committer.KafkaBatchCommitter",
-        MockKafkaBatchCommitter,
-    ):
-        handler: typing.Final = KafkaConcurrentHandler()
-        await handler.start()
+    handler: typing.Final = KafkaConcurrentHandler()
+    await handler.start()
 
-        handler._signal_handler(signal.SIGTERM)
-        assert handler._stop_task is not None
-        await handler._stop_task
-        assert not handler.is_running
+    handler._signal_handler(signal.SIGTERM)
+    assert handler._stop_task is not None
+    await handler._stop_task
+    assert not handler.is_running

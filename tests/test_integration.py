@@ -53,7 +53,7 @@ async def test_faststream_real_kafka_no_middleware(kafka_bootstrap_servers: str)
         await asyncio.sleep(POLL_SLEEP)
 
     assert len(processed) == 1
-    assert processed[0]["id"] == 99  # noqa: PLR2004
+    assert processed[0]["id"] == 99
 
 
 async def test_real_kafka_basic_processing(kafka_bootstrap_servers: str) -> None:
@@ -178,7 +178,7 @@ async def test_real_kafka_topic_group_filtering(kafka_bootstrap_servers: str) ->
         finally:
             await stop_concurrent_processing(broker.context)
 
-    assert len(processed) == 2  # noqa: PLR2004
+    assert len(processed) == 2
     ids: typing.Final = {msg["id"] for msg in processed}
     assert ids == {1, 2}
 
@@ -211,7 +211,87 @@ async def test_real_kafka_handler_exception_consumer_continues(kafka_bootstrap_s
             await stop_concurrent_processing(broker.context)
 
     assert len(processed) == 1
-    assert processed[0]["id"] == 2  # noqa: PLR2004
+    assert processed[0]["id"] == 2
+
+
+async def test_real_kafka_concurrency_limit_reached(kafka_bootstrap_servers: str) -> None:
+    """When all semaphore slots are saturated, subsequent messages queue and are still processed."""
+    limit: typing.Final = 2
+    n_messages: typing.Final = limit + 2  # force two messages to wait for a free slot
+    topic: typing.Final = _topic("saturated")
+    broker: typing.Final = _broker(kafka_bootstrap_servers)
+    start_times: typing.Final[list[float]] = []
+    completed: typing.Final[list[int]] = []
+
+    @broker.subscriber(topic, group_id="saturated-group", auto_offset_reset="earliest")
+    async def handler(msg: dict[str, int]) -> None:
+        start_times.append(asyncio.get_event_loop().time())
+        await asyncio.sleep(0.5)
+        completed.append(msg["id"])
+
+    await _create_topic(kafka_bootstrap_servers, topic)
+    async with broker:
+        await broker.start()
+        await initialize_concurrent_processing(
+            context=broker.context, commit_batch_size=10, commit_batch_timeout_sec=5, concurrency_limit=limit
+        )
+        await asyncio.sleep(CONSUMER_READY_SLEEP)
+        try:
+            for i in range(n_messages):
+                await broker.publish({"id": i}, topic=topic)
+            # enough time for all messages to be processed despite queuing
+            await asyncio.sleep(POLL_SLEEP + 0.5 * n_messages)
+        finally:
+            await stop_concurrent_processing(broker.context)
+
+    assert len(completed) == n_messages, f"Expected {n_messages} completed, got {len(completed)}"
+    # The 3rd start must happen after at least one of the first two finished (~0.5 s later)
+    start_times_sorted = sorted(start_times)
+    first_wave_end = start_times_sorted[0] + 0.5
+    assert start_times_sorted[limit] >= first_wave_end - 0.1, (
+        "3rd task started before limit freed — semaphore not enforced at saturation"
+    )
+
+
+async def test_real_kafka_multiple_subscribers(kafka_bootstrap_servers: str) -> None:
+    """Multiple subscribers on different topics share one broker and process messages concurrently."""
+    topic_a: typing.Final = _topic("multi-a")
+    topic_b: typing.Final = _topic("multi-b")
+    broker: typing.Final = _broker(kafka_bootstrap_servers)
+    processed_a: typing.Final[list[int]] = []
+    processed_b: typing.Final[list[int]] = []
+    n_each: typing.Final = 3
+
+    @broker.subscriber(topic_a, group_id="multi-group-a", auto_offset_reset="earliest")
+    async def handler_a(msg: dict[str, int]) -> None:
+        await asyncio.sleep(0.1)
+        processed_a.append(msg["id"])
+
+    @broker.subscriber(topic_b, group_id="multi-group-b", auto_offset_reset="earliest")
+    async def handler_b(msg: dict[str, int]) -> None:
+        await asyncio.sleep(0.1)
+        processed_b.append(msg["id"])
+
+    await _create_topic(kafka_bootstrap_servers, topic_a)
+    await _create_topic(kafka_bootstrap_servers, topic_b)
+    async with broker:
+        await broker.start()
+        await initialize_concurrent_processing(
+            context=broker.context, commit_batch_size=10, commit_batch_timeout_sec=5, concurrency_limit=0
+        )
+        await asyncio.sleep(CONSUMER_READY_SLEEP)
+        try:
+            for i in range(n_each):
+                await broker.publish({"id": i}, topic=topic_a)
+                await broker.publish({"id": i}, topic=topic_b)
+            await asyncio.sleep(POLL_SLEEP)
+        finally:
+            await stop_concurrent_processing(broker.context)
+
+    assert len(processed_a) == n_each, f"topic_a: expected {n_each}, got {len(processed_a)}"
+    assert len(processed_b) == n_each, f"topic_b: expected {n_each}, got {len(processed_b)}"
+    assert sorted(processed_a) == list(range(n_each))
+    assert sorted(processed_b) == list(range(n_each))
 
 
 async def test_real_kafka_graceful_shutdown_waits_for_tasks(kafka_bootstrap_servers: str) -> None:
@@ -237,4 +317,4 @@ async def test_real_kafka_graceful_shutdown_waits_for_tasks(kafka_bootstrap_serv
         await asyncio.sleep(POLL_SLEEP)  # let messages be received and dispatched
         await stop_concurrent_processing(broker.context)
 
-    assert len(completed) == 3  # noqa: PLR2004
+    assert len(completed) == 3

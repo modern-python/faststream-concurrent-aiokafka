@@ -3,7 +3,6 @@ import contextlib
 import functools
 import logging
 import signal
-import threading
 import typing
 
 from faststream.kafka import ConsumerRecord, TopicPartition
@@ -24,27 +23,12 @@ DEFAULT_CONCURRENCY_LIMIT: typing.Final = 10
 
 
 class KafkaConcurrentHandler:
-    _instance: typing.ClassVar["typing.Self | None"] = None
-    _lock: typing.ClassVar[threading.Lock] = threading.Lock()
-    _initialized: bool = False
-
-    def __new__(cls, *args: typing.Any, **kwargs: typing.Any) -> typing.Self:  # noqa: ARG004, ANN401
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-            return cls._instance
-
     def __init__(
         self,
         concurrency_limit: int = DEFAULT_CONCURRENCY_LIMIT,
-        commit_batch_timeout_sec: float = 10.0,
-        commit_batch_size: int = 10,
-        enable_batch_commit: bool = False,
+        committer: KafkaBatchCommitter | None = None,
         observer_interval: float = DEFAULT_OBSERVER_INTERVAL_SEC,
     ) -> None:
-        if self._initialized:
-            return
-
         self.limiter = asyncio.Semaphore(concurrency_limit) if concurrency_limit != 0 else None
         self._current_tasks: set[asyncio.Task[typing.Any]] = set()
 
@@ -53,19 +37,8 @@ class KafkaConcurrentHandler:
         self._observer_interval: float = observer_interval
         self._is_running: bool = False
 
-        self.enable_batch_commit = enable_batch_commit
-        self._commit_batch_timeout_sec: float = commit_batch_timeout_sec
-        self._commit_batch_size: int = commit_batch_size
-
-        self._committer: KafkaBatchCommitter | None = None
+        self._committer: KafkaBatchCommitter | None = committer
         self._stop_task: asyncio.Task[typing.Any] | None = None
-        self._initialized = True
-
-    @classmethod
-    def reset(cls) -> None:
-        with cls._lock:
-            cls._initialized = False
-            cls._instance = None
 
     def _is_need_to_process_message(self, message: KafkaAckableMessage) -> bool:
         headers_topic_group: typing.Final[str | None] = message.headers.get(TOPIC_GROUP_KEY)
@@ -101,7 +74,7 @@ class KafkaConcurrentHandler:
         task: typing.Final = asyncio.create_task(coroutine)
         self._current_tasks.add(task)
         task.add_done_callback(self._finish_task)
-        if self.enable_batch_commit and self._committer:
+        if self._committer:
             try:
                 await self._committer.send_task(
                     batch_committer.KafkaCommitTask(
@@ -159,8 +132,7 @@ class KafkaConcurrentHandler:
         self._is_running = True
         self._shutdown_event.clear()
 
-        if self.enable_batch_commit:
-            self._committer = KafkaBatchCommitter(self._commit_batch_timeout_sec, self._commit_batch_size)
+        if self._committer:
             self._committer.spawn()
         self._observer_task = asyncio.create_task(self.observer())
         self._setup_signal_handlers()
@@ -199,6 +171,10 @@ class KafkaConcurrentHandler:
             self._observer_task.cancel()
         await asyncio.sleep(0.5)
         self._current_tasks.clear()
+
+    @property
+    def has_batch_commit(self) -> bool:
+        return self._committer is not None
 
     @property
     def is_healthy(self) -> bool:
