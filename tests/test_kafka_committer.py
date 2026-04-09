@@ -34,10 +34,10 @@ def sample_task(mock_consumer: MockAIOKafkaConsumer) -> KafkaCommitTask:
 async def committer() -> typing.AsyncIterator[KafkaBatchCommitter]:
     committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=0.1, commit_batch_size=3)
     yield committer
-    if committer._asyncio_commit_process_task and not committer._asyncio_commit_process_task.done():
-        committer._asyncio_commit_process_task.cancel()
+    if committer._commit_task and not committer._commit_task.done():
+        committer._commit_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
-            await committer._asyncio_commit_process_task
+            await committer._commit_task
 
 
 def test_committer_raises_when_not_spawned(committer: KafkaBatchCommitter) -> None:
@@ -46,16 +46,16 @@ def test_committer_raises_when_not_spawned(committer: KafkaBatchCommitter) -> No
 
 
 async def test_committer_raises_when_cancelled(committer: KafkaBatchCommitter) -> None:
-    committer._asyncio_commit_process_task = asyncio.create_task(asyncio.sleep(100))
-    committer._asyncio_commit_process_task.cancel()
+    committer._commit_task = asyncio.create_task(asyncio.sleep(100))
+    committer._commit_task.cancel()
     await asyncio.sleep(0.5)
     with pytest.raises(CommitterIsDeadError):
         committer._check_is_commit_task_running()
 
 
 async def test_committer_raises_when_done(committer: KafkaBatchCommitter) -> None:
-    committer._asyncio_commit_process_task = asyncio.create_task(asyncio.sleep(100))
-    committer._asyncio_commit_process_task.cancel()
+    committer._commit_task = asyncio.create_task(asyncio.sleep(100))
+    committer._commit_task.cancel()
     await asyncio.sleep(0.5)
 
     with pytest.raises(CommitterIsDeadError):
@@ -63,15 +63,15 @@ async def test_committer_raises_when_done(committer: KafkaBatchCommitter) -> Non
 
 
 async def test_committer_passes_when_running(committer: KafkaBatchCommitter) -> None:
-    committer._asyncio_commit_process_task = asyncio.create_task(asyncio.sleep(100))
+    committer._commit_task = asyncio.create_task(asyncio.sleep(100))
     committer._check_is_commit_task_running()
 
 
 async def test_committer_spawn_creates_task(committer: KafkaBatchCommitter) -> None:
     committer.spawn()
 
-    assert committer._asyncio_commit_process_task is not None
-    assert not committer._asyncio_commit_process_task.done()
+    assert committer._commit_task is not None
+    assert not committer._commit_task.done()
 
     committer.spawn()
     assert committer.is_healthy
@@ -131,8 +131,8 @@ async def test_committer_close_graceful_shutdown(committer: KafkaBatchCommitter,
 
         mock_commit.side_effect = side_effect
         await committer.close()
-        assert committer._asyncio_commit_process_task
-        assert committer._asyncio_commit_process_task.done()
+        assert committer._commit_task
+        assert committer._commit_task.done()
 
 
 async def test_committer_close_timeout_cancels_task(committer: KafkaBatchCommitter) -> None:
@@ -143,8 +143,8 @@ async def test_committer_close_timeout_cancels_task(committer: KafkaBatchCommitt
         mock_run.side_effect = asyncio.sleep(10)
 
         await committer.close()
-        assert committer._asyncio_commit_process_task
-        assert committer._asyncio_commit_process_task.done()
+        assert committer._commit_task
+        assert committer._commit_task.done()
 
 
 async def test_committer_close_handles_not_running(
@@ -160,9 +160,9 @@ async def test_committer_is_healthy(committer: KafkaBatchCommitter) -> None:
     committer.spawn()
     assert committer.is_healthy
 
-    committer._asyncio_commit_process_task.cancel()
+    committer._commit_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
-        await committer._asyncio_commit_process_task
+        await committer._commit_task
 
     assert not committer.is_healthy
 
@@ -480,7 +480,7 @@ async def test_committer_very_large_batch_size(mock_consumer: MockAIOKafkaConsum
 
 async def test_committer_close_but_timeout_error(caplog: pytest.LogCaptureFixture) -> None:
     committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=0.1, commit_batch_size=10000)
-    committer._asyncio_commit_process_task = asyncio.create_task(asyncio.sleep(30))
+    committer._commit_task = asyncio.create_task(asyncio.sleep(30))
     committer._shutdown_timeout = 0.1
     await committer.close()
     await asyncio.sleep(0.5)
@@ -528,12 +528,40 @@ async def test_committer_partial_batch_failure_still_commits(
     assert "Task has finished with an exception" in caplog.text
 
 
+async def test_committer_handles_multiple_consumers(committer: KafkaBatchCommitter) -> None:
+    """Each consumer's commit is called with only its own partitions — no cross-consumer commits."""
+    consumer_a: typing.Final = MockAIOKafkaConsumer()
+    consumer_b: typing.Final = MockAIOKafkaConsumer()
+
+    task_a: typing.Final = KafkaCommitTask(
+        asyncio_task=MockAsyncioTask(result="ok"),  # ty: ignore[invalid-argument-type]
+        offset=10,
+        consumer=consumer_a,
+        topic_partition=TopicPartition(topic="topic-a", partition=0),
+    )
+    task_b: typing.Final = KafkaCommitTask(
+        asyncio_task=MockAsyncioTask(result="ok"),  # ty: ignore[invalid-argument-type]
+        offset=20,
+        consumer=consumer_b,
+        topic_partition=TopicPartition(topic="topic-b", partition=0),
+    )
+
+    for t in (task_a, task_b):
+        await committer._messages_queue.put(t)
+    batch: typing.Final = [await committer._messages_queue.get(), await committer._messages_queue.get()]
+
+    await committer._commit_tasks_batch(batch)
+
+    consumer_a.commit.assert_called_once_with({TopicPartition(topic="topic-a", partition=0): 11})
+    consumer_b.commit.assert_called_once_with({TopicPartition(topic="topic-b", partition=0): 21})
+
+
 async def test_committer_close_but_unexpected_error() -> None:
     committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=0.1, commit_batch_size=10)
     mock_task: typing.Final = MagicMock()
     mock_task.done.return_value = False
     mock_task.cancelled.return_value = False
-    committer._asyncio_commit_process_task = mock_task
+    committer._commit_task = mock_task
 
     original_exception: typing.Final = RuntimeError("Original error")
 

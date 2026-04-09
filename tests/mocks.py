@@ -25,6 +25,29 @@ class MockAsyncioTask:
         return self._result
 
 
+class MockKafkaMessage:
+    def __init__(
+        self,
+        topic: str = "test-topic",
+        partition: int = 0,
+        offset: int = 100,
+        headers: dict[str, str] | None = None,
+        group_id: str = "test-group",
+    ) -> None:
+        self.topic = topic
+        self.partition = partition
+        self.offset = offset
+        self.headers = headers or {}
+        self.consumer = MockAIOKafkaConsumer(group_id)
+
+
+class MockConsumerRecord:
+    def __init__(self, topic: str = "test-topic", partition: int = 0, offset: int = 100) -> None:
+        self.topic = topic
+        self.partition = partition
+        self.offset = offset
+
+
 class MockKafkaBatchCommitter:
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         self.send_task = AsyncMock()

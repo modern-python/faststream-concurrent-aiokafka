@@ -4,6 +4,7 @@ import uuid
 
 from aiokafka.admin import AIOKafkaAdminClient, NewTopic
 from faststream.kafka import KafkaBroker
+from faststream.middlewares import AckPolicy
 
 from faststream_concurrent_aiokafka import (
     KafkaConcurrentProcessingMiddleware,
@@ -61,7 +62,7 @@ async def test_real_kafka_basic_processing(kafka_bootstrap_servers: str) -> None
     topic: typing.Final = _topic("basic")
     broker: typing.Final = _broker(kafka_bootstrap_servers)
 
-    @broker.subscriber(topic, group_id="basic-group", auto_offset_reset="earliest")
+    @broker.subscriber(topic, group_id="basic-group", auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: dict[str, int]) -> None:
         processed.append(msg)
 
@@ -89,7 +90,7 @@ async def test_real_kafka_concurrent_processing(kafka_bootstrap_servers: str) ->
     n_messages: typing.Final = 5
     broker: typing.Final = _broker(kafka_bootstrap_servers)
 
-    @broker.subscriber(topic, group_id="concurrent-group", auto_offset_reset="earliest")
+    @broker.subscriber(topic, group_id="concurrent-group", auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: dict[str, int]) -> None:
         loop: typing.Final = asyncio.get_event_loop()
         timestamps.append(("start", msg["id"], loop.time()))
@@ -100,7 +101,7 @@ async def test_real_kafka_concurrent_processing(kafka_bootstrap_servers: str) ->
     async with broker:
         await broker.start()
         await initialize_concurrent_processing(
-            context=broker.context, commit_batch_size=10, commit_batch_timeout_sec=5, concurrency_limit=0
+            context=broker.context, commit_batch_size=10, commit_batch_timeout_sec=5, concurrency_limit=100
         )
         await asyncio.sleep(CONSUMER_READY_SLEEP)
         try:
@@ -125,7 +126,7 @@ async def test_real_kafka_concurrency_limit(kafka_bootstrap_servers: str) -> Non
     topic: typing.Final = _topic("limited")
     broker: typing.Final = _broker(kafka_bootstrap_servers)
 
-    @broker.subscriber(topic, group_id="limited-group", auto_offset_reset="earliest")
+    @broker.subscriber(topic, group_id="limited-group", auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
     async def handler(_msg: dict[str, int]) -> None:
         concurrent[0] += 1
         max_concurrent[0] = max(max_concurrent[0], concurrent[0])
@@ -150,46 +151,13 @@ async def test_real_kafka_concurrency_limit(kafka_bootstrap_servers: str) -> Non
     assert max_concurrent[0] > 1, "Expected concurrent execution but got sequential"
 
 
-async def test_real_kafka_topic_group_filtering(kafka_bootstrap_servers: str) -> None:
-    processed: typing.Final[list[dict[str, int]]] = []
-    topic: typing.Final = _topic("filter")
-    group_id: typing.Final = "filter-group"
-    broker: typing.Final = _broker(kafka_bootstrap_servers)
-
-    @broker.subscriber(topic, group_id=group_id, auto_offset_reset="earliest")
-    async def handler(msg: dict[str, int]) -> None:
-        processed.append(msg)
-
-    await _create_topic(kafka_bootstrap_servers, topic)
-    async with broker:
-        await broker.start()
-        await initialize_concurrent_processing(
-            context=broker.context, commit_batch_size=10, commit_batch_timeout_sec=5, concurrency_limit=5
-        )
-        await asyncio.sleep(CONSUMER_READY_SLEEP)
-        try:
-            # No header → processed
-            await broker.publish({"id": 1}, topic=topic)
-            # Matching header → processed
-            await broker.publish({"id": 2}, topic=topic, headers={"topic_group": group_id})
-            # Non-matching header → skipped
-            await broker.publish({"id": 3}, topic=topic, headers={"topic_group": "other-group"})
-            await asyncio.sleep(POLL_SLEEP)
-        finally:
-            await stop_concurrent_processing(broker.context)
-
-    assert len(processed) == 2
-    ids: typing.Final = {msg["id"] for msg in processed}
-    assert ids == {1, 2}
-
-
 async def test_real_kafka_handler_exception_consumer_continues(kafka_bootstrap_servers: str) -> None:
     """A handler exception must not crash the consumer — subsequent messages are processed."""
     processed: typing.Final[list[dict[str, int]]] = []
     topic: typing.Final = _topic("excepts")
     broker: typing.Final = _broker(kafka_bootstrap_servers)
 
-    @broker.subscriber(topic, group_id="excepts-group", auto_offset_reset="earliest")
+    @broker.subscriber(topic, group_id="excepts-group", auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: dict[str, int]) -> None:
         if msg["id"] == 1:
             msg_0 = "intentional failure"
@@ -223,7 +191,7 @@ async def test_real_kafka_concurrency_limit_reached(kafka_bootstrap_servers: str
     start_times: typing.Final[list[float]] = []
     completed: typing.Final[list[int]] = []
 
-    @broker.subscriber(topic, group_id="saturated-group", auto_offset_reset="earliest")
+    @broker.subscriber(topic, group_id="saturated-group", auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: dict[str, int]) -> None:
         start_times.append(asyncio.get_event_loop().time())
         await asyncio.sleep(0.5)
@@ -262,14 +230,12 @@ async def test_real_kafka_multiple_subscribers(kafka_bootstrap_servers: str) -> 
     processed_b: typing.Final[list[int]] = []
     n_each: typing.Final = 3
 
-    @broker.subscriber(topic_a, group_id="multi-group-a", auto_offset_reset="earliest")
+    @broker.subscriber(topic_a, group_id="multi-group-a", auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
     async def handler_a(msg: dict[str, int]) -> None:
-        await asyncio.sleep(0.1)
         processed_a.append(msg["id"])
 
-    @broker.subscriber(topic_b, group_id="multi-group-b", auto_offset_reset="earliest")
+    @broker.subscriber(topic_b, group_id="multi-group-b", auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
     async def handler_b(msg: dict[str, int]) -> None:
-        await asyncio.sleep(0.1)
         processed_b.append(msg["id"])
 
     await _create_topic(kafka_bootstrap_servers, topic_a)
@@ -277,7 +243,7 @@ async def test_real_kafka_multiple_subscribers(kafka_bootstrap_servers: str) -> 
     async with broker:
         await broker.start()
         await initialize_concurrent_processing(
-            context=broker.context, commit_batch_size=10, commit_batch_timeout_sec=5, concurrency_limit=0
+            context=broker.context, commit_batch_size=10, commit_batch_timeout_sec=5, concurrency_limit=100
         )
         await asyncio.sleep(CONSUMER_READY_SLEEP)
         try:
@@ -300,7 +266,7 @@ async def test_real_kafka_graceful_shutdown_waits_for_tasks(kafka_bootstrap_serv
     topic: typing.Final = _topic("shutdown")
     broker: typing.Final = _broker(kafka_bootstrap_servers)
 
-    @broker.subscriber(topic, group_id="shutdown-group", auto_offset_reset="earliest")
+    @broker.subscriber(topic, group_id="shutdown-group", auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: dict[str, int]) -> None:
         await asyncio.sleep(0.5)
         completed.append(msg["id"])
@@ -318,3 +284,79 @@ async def test_real_kafka_graceful_shutdown_waits_for_tasks(kafka_bootstrap_serv
         await stop_concurrent_processing(broker.context)
 
     assert len(completed) == 3
+
+
+async def test_real_kafka_multi_subscriber_commits_all_offsets(kafka_bootstrap_servers: str) -> None:
+    """Offsets for all subscribers are committed — regression for single-consumer assumption in batch committer.
+
+    With AckPolicy.MANUAL, enable_auto_commit=False; the batch committer is the sole
+    commit mechanism. After a clean stop, restarting with the same group IDs must replay
+    zero messages — proving both consumers' offsets were committed.
+    """
+    topic_a: typing.Final = _topic("commit-a")
+    topic_b: typing.Final = _topic("commit-b")
+    group_a: typing.Final = f"commit-group-a-{uuid.uuid4().hex[:6]}"
+    group_b: typing.Final = f"commit-group-b-{uuid.uuid4().hex[:6]}"
+    n_each: typing.Final = 3
+
+    await _create_topic(kafka_bootstrap_servers, topic_a)
+    await _create_topic(kafka_bootstrap_servers, topic_b)
+
+    # Phase 1: consume messages; batch committer commits offsets for both consumers
+    processed_a: typing.Final[list[int]] = []
+    processed_b: typing.Final[list[int]] = []
+
+    broker1: typing.Final = _broker(kafka_bootstrap_servers)
+
+    @broker1.subscriber(topic_a, group_id=group_a, auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
+    async def handler_a(msg: dict[str, int]) -> None:
+        processed_a.append(msg["id"])
+
+    @broker1.subscriber(topic_b, group_id=group_b, auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
+    async def handler_b(msg: dict[str, int]) -> None:
+        processed_b.append(msg["id"])
+
+    async with broker1:
+        await broker1.start()
+        await initialize_concurrent_processing(
+            context=broker1.context, commit_batch_size=10, commit_batch_timeout_sec=2, concurrency_limit=5
+        )
+        await asyncio.sleep(CONSUMER_READY_SLEEP)
+        try:
+            for i in range(n_each):
+                await broker1.publish({"id": i}, topic=topic_a)
+                await broker1.publish({"id": i}, topic=topic_b)
+            await asyncio.sleep(POLL_SLEEP)
+        finally:
+            await stop_concurrent_processing(broker1.context)
+
+    assert len(processed_a) == n_each, f"phase 1: topic_a expected {n_each}, got {len(processed_a)}"
+    assert len(processed_b) == n_each, f"phase 1: topic_b expected {n_each}, got {len(processed_b)}"
+
+    # Phase 2: restart with same group IDs; if offsets were committed, nothing replays
+    replayed_a: typing.Final[list[int]] = []
+    replayed_b: typing.Final[list[int]] = []
+
+    broker2: typing.Final = _broker(kafka_bootstrap_servers)
+
+    @broker2.subscriber(topic_a, group_id=group_a, auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
+    async def handler_a2(msg: dict[str, int]) -> None:  # pragma: no cover
+        replayed_a.append(msg["id"])
+
+    @broker2.subscriber(topic_b, group_id=group_b, auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
+    async def handler_b2(msg: dict[str, int]) -> None:  # pragma: no cover
+        replayed_b.append(msg["id"])
+
+    async with broker2:
+        await broker2.start()
+        await initialize_concurrent_processing(
+            context=broker2.context, commit_batch_size=10, commit_batch_timeout_sec=2, concurrency_limit=5
+        )
+        await asyncio.sleep(CONSUMER_READY_SLEEP)
+        try:
+            await asyncio.sleep(POLL_SLEEP)
+        finally:
+            await stop_concurrent_processing(broker2.context)
+
+    assert replayed_a == [], f"topic_a messages replayed after clean stop: {replayed_a}"
+    assert replayed_b == [], f"topic_b messages replayed after clean stop: {replayed_b}"

@@ -3,7 +3,6 @@ import contextlib
 import dataclasses
 import itertools
 import logging
-import threading
 import typing
 
 from faststream.kafka import TopicPartition
@@ -16,7 +15,7 @@ if typing.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-SHUTDOWN_TIMEOUT_SEC: typing.Final = 20
+GRACEFUL_TIMEOUT_SEC: typing.Final = 20
 
 
 class CommitterIsDeadError(Exception): ...
@@ -37,20 +36,16 @@ class KafkaBatchCommitter:
         commit_batch_size: int = 10,
     ) -> None:
         self._messages_queue: asyncio.Queue[KafkaCommitTask] = asyncio.Queue()
-        self._asyncio_commit_process_task: asyncio.Task[typing.Any] | None = None
+        self._commit_task: asyncio.Task[typing.Any] | None = None
         self._flush_batch_event = asyncio.Event()
 
         self._commit_batch_timeout_sec = commit_batch_timeout_sec
         self._commit_batch_size = commit_batch_size
-        self._shutdown_timeout = SHUTDOWN_TIMEOUT_SEC
-
-        self._spawn_lock = threading.Lock()
+        self._shutdown_timeout = GRACEFUL_TIMEOUT_SEC
 
     def _check_is_commit_task_running(self) -> None:
-        is_commit_task_running: typing.Final[bool] = bool(
-            self._asyncio_commit_process_task
-            and not self._asyncio_commit_process_task.cancelled()
-            and not self._asyncio_commit_process_task.done(),
+        is_commit_task_running = bool(
+            self._commit_task and not self._commit_task.cancelled() and not self._commit_task.done(),
         )
         if not is_commit_task_running:
             msg: typing.Final = "Committer main task is not running"
@@ -120,11 +115,20 @@ class KafkaBatchCommitter:
                 await self._messages_queue.put(task)
         return commit_succeeded
 
-    async def _commit_tasks_batch(self, tasks_batch: list[KafkaCommitTask]) -> bool:
-        partitions_to_tasks: typing.Final = itertools.groupby(
-            sorted(tasks_batch, key=lambda x: x.topic_partition), lambda x: x.topic_partition
+    @staticmethod
+    def _map_offsets_per_partition(consumer_tasks: list[KafkaCommitTask]) -> dict[TopicPartition, int]:
+        partitions_to_tasks = itertools.groupby(
+            sorted(consumer_tasks, key=lambda x: x.topic_partition), lambda x: x.topic_partition
         )
+        partitions_to_offsets: dict[TopicPartition, int] = {}
+        for partition, partition_tasks in partitions_to_tasks:
+            max_offset = max((task.offset for task in partition_tasks), default=None)
+            if max_offset is not None:
+                # Kafka commits the *next* offset to fetch, so committed = processed_max + 1
+                partitions_to_offsets[partition] = max_offset + 1
+        return partitions_to_offsets
 
+    async def _commit_tasks_batch(self, tasks_batch: list[KafkaCommitTask]) -> bool:
         results: typing.Final = await asyncio.gather(
             *[task.asyncio_task for task in tasks_batch], return_exceptions=True
         )
@@ -132,23 +136,20 @@ class KafkaBatchCommitter:
             if isinstance(result, BaseException):
                 logger.error("Task has finished with an exception", exc_info=result)
 
-        partitions_to_offsets: typing.Final[dict[TopicPartition, int]] = {}
-        partition: TopicPartition
-        tasks: typing.Iterator[KafkaCommitTask]
-        for partition, tasks in partitions_to_tasks:
-            max_message_offset: int | None = None
-            for task in tasks:
-                if max_message_offset is None or task.offset > max_message_offset:
-                    max_message_offset = task.offset
+        # Group by consumer instance — each AIOKafkaConsumer can only commit its own partitions
+        consumers_tasks: dict[int, list[KafkaCommitTask]] = {}
+        for task in tasks_batch:
+            consumers_tasks.setdefault(id(task.consumer), []).append(task)
 
-            if max_message_offset is not None:
-                # Kafka commits the *next* offset to fetch, so committed = processed_max + 1
-                partitions_to_offsets[partition] = max_message_offset + 1
+        all_succeeded = True
+        for consumer_tasks in consumers_tasks.values():
+            partitions_to_offsets = self._map_offsets_per_partition(consumer_tasks)
+            if not await self._call_committer(consumer_tasks, partitions_to_offsets):
+                all_succeeded = False
 
-        commit_succeeded: typing.Final = await self._call_committer(tasks_batch, partitions_to_offsets)
         for _ in tasks_batch:
             self._messages_queue.task_done()
-        return commit_succeeded
+        return all_succeeded
 
     async def _run_commit_process(self) -> None:
         should_shutdown = False
@@ -158,7 +159,7 @@ class KafkaBatchCommitter:
                 await self._commit_tasks_batch(commit_batch)
 
     async def commit_all(self) -> None:
-        """Commit all without shutting down the main process."""
+        """Flush and commit all pending tasks, then stop the committer loop."""
         self._flush_batch_event.set()
         await self._messages_queue.join()
 
@@ -169,30 +170,29 @@ class KafkaBatchCommitter:
         )
 
     def spawn(self) -> None:
-        with self._spawn_lock:
-            if not self._asyncio_commit_process_task:
-                self._asyncio_commit_process_task = asyncio.create_task(self._run_commit_process())
-            else:
-                logger.error("Committer main task already running")
+        if not self._commit_task:
+            self._commit_task = asyncio.create_task(self._run_commit_process())
+        else:
+            logger.error("Committer main task already running")
 
     async def close(self) -> None:
         """Close committer."""
-        if not self._asyncio_commit_process_task:
+        if not self._commit_task:
             logger.error("Committer main task is not running, cannot close committer properly")
             return
 
         self._flush_batch_event.set()
         try:
-            await asyncio.wait_for(self._asyncio_commit_process_task, timeout=self._shutdown_timeout)
+            await asyncio.wait_for(self._commit_task, timeout=self._shutdown_timeout)
         except TimeoutError:
             logger.exception("Committer main task shutdown timed out, forcing cancellation")
-            self._asyncio_commit_process_task.cancel()
+            self._commit_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._asyncio_commit_process_task
+                await self._commit_task
         except Exception as exc:
             logger.exception("Committer task failed during shutdown", exc_info=exc)
             raise
 
     @property
     def is_healthy(self) -> bool:
-        return self._asyncio_commit_process_task is not None and not self._asyncio_commit_process_task.done()
+        return self._commit_task is not None and not self._commit_task.done()

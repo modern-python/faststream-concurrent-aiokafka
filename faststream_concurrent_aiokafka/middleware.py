@@ -19,33 +19,25 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
         msg: KafkaAckableMessage,
     ) -> typing.Any:  # noqa: ANN401
         concurrent_processing: typing.Final[KafkaConcurrentHandler] = self.context.get(_PROCESSING_CONTEXT_KEY)
-        if not concurrent_processing:
-            logger.error("Kafka middleware. There is no concurrent processing instance in the context")
-            info = "No concurrent processing instance in the context"
-            raise RuntimeError(info)
-
-        if not concurrent_processing.is_running:
-            logger.error(
-                "Kafka middleware. Concurrent processing is not running. Maybe `initialize_concurrent_processing`"
-                " was forgotten?"
-            )
-            info = "Concurrent processing is not running"
-            raise RuntimeError(info)
+        if not concurrent_processing or not concurrent_processing.is_running:
+            err = "Concurrent processing is not running. Call `initialize_concurrent_processing` on app startup."
+            raise RuntimeError(err)
 
         kafka_message: typing.Final = self.context.get("message")
-        if concurrent_processing.has_batch_commit and not kafka_message:
-            logger.error("Kafka middleware. No kafka message in the middleware, it means no consumer to commit batch.")
-            info = "No kafka message in the middleware"
-            raise RuntimeError(info)
+        if not kafka_message:
+            err = "No Kafka message found in context. Ensure the middleware is used with a Kafka subscriber."
+            raise RuntimeError(err)
 
-        try:
+        if getattr(kafka_message.consumer, "_enable_auto_commit", False):
+            err = (
+                "KafkaConcurrentProcessingMiddleware requires ack_policy=AckPolicy.MANUAL on all subscribers. "
+                "Auto-commit is enabled on this consumer, which commits offsets before processing tasks "
+                "complete and can cause message loss on crash. "
+                "Add ack_policy=AckPolicy.MANUAL to your @broker.subscriber(...) decorator."
+            )
+            raise RuntimeError(err)
 
-            async def handler_wrapper() -> typing.Any:  # noqa: ANN401
-                return await call_next(msg)
-
-            await concurrent_processing.handle_task(handler_wrapper(), self.msg, kafka_message)
-        except Exception as exc:
-            raise RuntimeError(f"Kafka middleware. An error while sending task {msg}") from exc
+        await concurrent_processing.handle_task(call_next(msg), self.msg, kafka_message)
 
 
 async def initialize_concurrent_processing(
@@ -60,8 +52,11 @@ async def initialize_concurrent_processing(
         return existing
 
     concurrent_processing: typing.Final = KafkaConcurrentHandler(
+        committer=KafkaBatchCommitter(
+            commit_batch_timeout_sec=commit_batch_timeout_sec,
+            commit_batch_size=commit_batch_size,
+        ),
         concurrency_limit=concurrency_limit,
-        committer=KafkaBatchCommitter(commit_batch_timeout_sec, commit_batch_size),
     )
     await concurrent_processing.start()
     context.set_global(_PROCESSING_CONTEXT_KEY, concurrent_processing)
