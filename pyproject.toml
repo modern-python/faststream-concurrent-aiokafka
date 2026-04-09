@@ -2,7 +2,7 @@
 name = "faststream-concurrent-aiokafka"
 description = "Concurrent message processing middleware for FastStream with aiokafka"
 authors = [
-    { name = "Kevin Smith" },
+    { name = "Artur Shiriev", email = "me@shiriev.ru" },
 ]
 readme = "README.md"
 requires-python = ">=3.11,<4"
