@@ -1,0 +1,92 @@
+[project]
+name = "faststream-concurrent-aiokafka"
+description = "Concurrent message processing middleware for FastStream with aiokafka"
+authors = [
+    { name = "Kevin Smith" },
+]
+readme = "README.md"
+requires-python = ">=3.11,<4"
+license = "MIT"
+keywords = [
+    "python",
+    "kafka",
+    "faststream",
+    "aiokafka",
+    "concurrent",
+    "middleware",
+]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+    "Topic :: Software Development :: Libraries",
+]
+version = "0"
+dependencies = [
+    "faststream[kafka]",
+]
+
+[project.urls]
+repository = "https://github.com/modern-python/faststream-concurrent-aiokafka"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "pytest-xdist",
+    "pytest-asyncio>=0.23.4",
+    "pytest-randomly",
+]
+lint = [
+    "ruff",
+    "ty",
+    "auto-typing-final",
+    "eof-fixer"
+]
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "faststream_concurrent_aiokafka"
+module-root = ""
+
+[tool.ruff]
+fix = true
+unsafe-fixes = true
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D1", # allow missing docstrings
+    "FBT", # allow boolean args
+    "TRY003", # allow long exception messages
+    "EM102", # allow f-string for exception message
+    "D203", # "one-blank-line-before-class" conflicting with D211
+    "D213", # "multi-line-summary-first-line" conflicting with D212
+    "COM812", # flake8-commas "Trailing comma missing"
+    "ISC001", # flake8-implicit-str-concat
+    "G004", # allow f-string for logging
+]
+isort.lines-after-imports = 2
+isort.no-lines-before = ["standard-library", "local-folder"]
+
+[tool.ruff.lint.extend-per-file-ignores]
+"tests/*.py" = [
+    "S101", # allow asserts
+]
+
+[tool.pytest.ini_options]
+addopts = "--cov=. --cov-report term-missing"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.report]
+exclude_also = [
+    "if typing.TYPE_CHECKING:",
+]
