@@ -524,7 +524,7 @@ async def test_committer_partial_batch_failure_still_commits(
     mock_commit.assert_called_once()
     call_args: typing.Final = mock_commit.call_args[0][1]
     # Max offset is 101; Kafka commits next-to-fetch offset = max + 1
-    assert call_args[TopicPartition(topic="t1", partition=0)] == 102  # noqa: PLR2004
+    assert call_args[TopicPartition(topic="t1", partition=0)] == 102
     assert "Task has finished with an exception" in caplog.text
 
 
