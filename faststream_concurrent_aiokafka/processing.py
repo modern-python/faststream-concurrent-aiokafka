@@ -77,7 +77,7 @@ class KafkaConcurrentHandler:
             self.limiter.release()
         exc: typing.Final[BaseException | None] = task.exception()
         if exc:
-            logger.error("Kafka middleware. Kafka middleware. Task has failed with the exception", exc_info=exc)
+            logger.error("Kafka middleware. Task has failed with the exception", exc_info=exc)
         self._current_tasks.discard(task)
 
     async def handle_task(
@@ -86,28 +86,28 @@ class KafkaConcurrentHandler:
         record: ConsumerRecord,
         kafka_message: KafkaAckableMessage,
     ) -> None:
+        if not self._is_need_to_process_message(kafka_message):
+            coroutine.close()
+            return
         if self.limiter:
             await self.limiter.acquire()
-        if self._is_need_to_process_message(kafka_message):
-            task: typing.Final = asyncio.create_task(coroutine)
-            self._current_tasks.add(task)
-            task.add_done_callback(self._finish_task)
-            if self.enable_batch_commit and self._committer:
-                try:
-                    await self._committer.send_task(
-                        batch_committer.KafkaCommitTask(
-                            asyncio_task=task,
-                            offset=record.offset,
-                            consumer=kafka_message.consumer,
-                            topic_partition=TopicPartition(topic=record.topic, partition=record.partition),
-                        )
+        task: typing.Final = asyncio.create_task(coroutine)
+        self._current_tasks.add(task)
+        task.add_done_callback(self._finish_task)
+        if self.enable_batch_commit and self._committer:
+            try:
+                await self._committer.send_task(
+                    batch_committer.KafkaCommitTask(
+                        asyncio_task=task,
+                        offset=record.offset,
+                        consumer=kafka_message.consumer,
+                        topic_partition=TopicPartition(topic=record.topic, partition=record.partition),
                     )
-                except batch_committer.CommitterIsDeadError:
-                    logger.exception("Kafka middleware. Committer is dead")
-                    await self.stop()
-                    raise
-        elif self.limiter:
-            self.limiter.release()
+                )
+            except batch_committer.CommitterIsDeadError:
+                logger.exception("Kafka middleware. Committer is dead")
+                await self.stop()
+                raise
 
     async def _check_tasks_health(self) -> None:
         to_discard: typing.Final = []
@@ -116,8 +116,6 @@ class KafkaConcurrentHandler:
                 to_discard.append(task)
         for task in to_discard:
             self._current_tasks.discard(task)
-            if self.limiter:
-                self.limiter.release()
         if to_discard:
             logger.info(f"Kafka middleware. Found completed but not discarded tasks, amount: {len(to_discard)}")
 

@@ -19,7 +19,7 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
     ) -> typing.Any:  # noqa: ANN401
         concurrent_processing: typing.Final[KafkaConcurrentHandler] = self.context.get(_PROCESSING_CONTEXT_KEY)
         if not concurrent_processing:
-            logger.exception("Kafka middleware. There is no concurrent processing instance in the context")
+            logger.error("Kafka middleware. There is no concurrent processing instance in the context")
             info = "No concurrent processing instance in the context"
             raise RuntimeError(info)
         if not concurrent_processing.is_running:
@@ -47,7 +47,7 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
 async def initialize_concurrent_processing(
     context: ContextRepo,
     commit_batch_size: int,
-    commit_batch_timeout_sec: int,
+    commit_batch_timeout_sec: float,
     concurrency_limit: int = DEFAULT_CONCURRENCY_LIMIT,
     enable_batch_commit: bool = False,
 ) -> None:

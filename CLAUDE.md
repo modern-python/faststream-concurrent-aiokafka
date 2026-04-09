@@ -15,7 +15,7 @@ just publish       # bump version to $GITHUB_REF_NAME, build, publish to PyPI
 
 Run a single test file or test by name:
 ```bash
-uv run --no-sync pytest tests/committer/test_kafka_committer.py
+uv run --no-sync pytest tests/test_kafka_committer.py
 uv run --no-sync pytest -k test_committer_logs_task_exceptions
 ```
 
@@ -43,6 +43,6 @@ Runs as a background asyncio task (spawned via `spawn()`). Collects `KafkaCommit
 
 ## Key patterns
 
-- **Singleton reset in tests**: `KafkaConcurrentHandler._initialized = False` and `._instance = None` must be reset between tests (done in conftest fixtures via `stop_concurrent_processing`).
+- **Singleton reset in tests**: `KafkaConcurrentHandler._initialized = False` and `._instance = None` must be reset between tests. Each test file does this directly in an `autouse` `reset_singleton` fixture — not via `stop_concurrent_processing`.
 - **Type suppression**: use `# ty: ignore[rule-name]` (not `# type: ignore`) for ty type checker suppressions.
 - **No `from __future__ import annotations`**: annotations are evaluated eagerly; `typing.Self`/`typing.Never` are used directly (requires Python ≥ 3.11).
