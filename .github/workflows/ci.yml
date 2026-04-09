@@ -20,7 +20,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "**/pyproject.toml"
-      - run: uv python install 3.11
+      - run: uv python install 3.13
       - run: just install lint-ci
 
   pytest:
@@ -33,20 +33,24 @@ jobs:
           - "3.12"
           - "3.13"
           - "3.14"
+    services:
+      redpanda:
+        image: redpandadata/redpanda:latest
+        ports:
+          - 9092:9092
+        options: >-
+          --health-cmd "rpk cluster health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v2
       - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
           cache-dependency-glob: "**/pyproject.toml"
       - run: uv python install ${{ matrix.python-version }}
-      - run: just install
-      - run: just test . --cov=. --cov-report xml
-      - uses: codecov/codecov-action@v4.0.1
+      - run: uv sync --frozen
+      - run: uv run --no-sync pytest . --cov=. --cov-report xml
         env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        with:
-          files: ./coverage.xml
-          flags: unittests
-          name: codecov-${{ matrix.python-version }}
+          KAFKA_BOOTSTRAP_SERVERS: localhost:9092

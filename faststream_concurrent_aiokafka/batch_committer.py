@@ -66,31 +66,30 @@ class KafkaBatchCommitter:
         uncommited_tasks: typing.Final[list[KafkaCommitTask]] = []
         should_shutdown = False
         queue_get_task: asyncio.Task[typing.Any] | None = None
-        flush_wait_task: asyncio.Task[typing.Any] | None = None
-        timeout_task: asyncio.Task[typing.Any] | None = None
+        # Create timeout and flush-wait tasks once; reused across queue-get iterations.
+        timeout_task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(self._commit_batch_timeout_sec))
+        flush_wait_task: asyncio.Task[bool] = asyncio.create_task(self._flush_batch_event.wait())
         try:
-            timeout_task = asyncio.create_task(asyncio.sleep(self._commit_batch_timeout_sec))
             while len(uncommited_tasks) < self._commit_batch_size:
                 queue_get_task = asyncio.create_task(self._messages_queue.get())
-                flush_wait_task = asyncio.create_task(self._flush_batch_event.wait())
-                await asyncio.wait([queue_get_task, flush_wait_task, timeout_task], return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(
+                    [queue_get_task, flush_wait_task, timeout_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
 
-                if queue_get_task.done():
+                if queue_get_task in done:
                     uncommited_tasks.append(queue_get_task.result())
                 else:
                     queue_get_task.cancel()
 
-                # commit_all is called
-                if flush_wait_task.done():
-                    queue_get_task.cancel()
+                # commit_all was called — flush remaining queue items and stop
+                if flush_wait_task in done:
                     uncommited_tasks.extend(self._flush_tasks_queue())
                     self._flush_batch_event.clear()
-                    timeout_task.cancel()
                     should_shutdown = True
                     break
-                flush_wait_task.cancel()
 
-                if timeout_task.done():
+                if timeout_task in done:
                     logger.debug("Timeout exceeded, batch contains %s elements", len(uncommited_tasks))
                     break
 
@@ -100,7 +99,8 @@ class KafkaBatchCommitter:
             uncommited_tasks.extend(self._flush_tasks_queue())
 
         for task in (queue_get_task, flush_wait_task, timeout_task):
-            task and task.cancel()
+            if task:
+                task.cancel()
 
         return uncommited_tasks, should_shutdown
 
@@ -142,6 +142,7 @@ class KafkaBatchCommitter:
                     max_message_offset = task.offset
 
             if max_message_offset is not None:
+                # Kafka commits the *next* offset to fetch, so committed = processed_max + 1
                 partitions_to_offsets[partition] = max_message_offset + 1
 
         commit_succeeded: typing.Final = await self._call_committer(tasks_batch, partitions_to_offsets)

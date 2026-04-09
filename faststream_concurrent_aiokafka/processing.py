@@ -58,7 +58,14 @@ class KafkaConcurrentHandler:
         self._commit_batch_size: int = commit_batch_size
 
         self._committer: KafkaBatchCommitter | None = None
+        self._stop_task: asyncio.Task[typing.Any] | None = None
         self._initialized = True
+
+    @classmethod
+    def reset(cls) -> None:
+        with cls._lock:
+            cls._initialized = False
+            cls._instance = None
 
     def _is_need_to_process_message(self, message: KafkaAckableMessage) -> bool:
         headers_topic_group: typing.Final[str | None] = message.headers.get(TOPIC_GROUP_KEY)
@@ -143,7 +150,7 @@ class KafkaConcurrentHandler:
 
     def _signal_handler(self, sig: signal.Signals) -> None:
         logger.info(f"Kafka middleware. Received signal {sig.name}, initiating graceful shutdown...")
-        asyncio.create_task(self.stop())  # noqa: RUF006
+        self._stop_task = asyncio.create_task(self.stop())
 
     async def start(self) -> None:
         if self._is_running:

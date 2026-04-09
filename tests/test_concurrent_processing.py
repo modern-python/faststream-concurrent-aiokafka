@@ -4,18 +4,14 @@ import contextlib
 import logging
 import signal
 import typing
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
 
 from faststream_concurrent_aiokafka.batch_committer import CommitterIsDeadError
 from faststream_concurrent_aiokafka.processing import KafkaConcurrentHandler
-
-
-class MockAIOKafkaConsumer:
-    def __init__(self, group_id: str = "test-group") -> None:
-        self._group_id = group_id
+from tests.mocks import MockAIOKafkaConsumer, MockKafkaBatchCommitter
 
 
 class MockKafkaMessage:
@@ -39,29 +35,6 @@ class MockConsumerRecord:
         self.topic = topic
         self.partition = partition
         self.offset = offset
-
-
-class MockKafkaBatchCommitter:
-    def __init__(self, *args: list[str | int], **kwargs: dict[str, str | int]) -> None:
-        self.send_task = AsyncMock()
-        self.close = AsyncMock()
-        self.spawn = Mock()
-        self._healthy = True
-        if args or kwargs:
-            pass
-
-    @property
-    def is_healthy(self) -> bool:
-        return self._healthy
-
-
-@pytest.fixture(autouse=True)
-def reset_singleton() -> typing.Iterator[None]:
-    KafkaConcurrentHandler._instance = None
-    KafkaConcurrentHandler._initialized = False
-    yield
-    KafkaConcurrentHandler._instance = None
-    KafkaConcurrentHandler._initialized = False
 
 
 @pytest_asyncio.fixture
@@ -312,7 +285,7 @@ async def test_concurrent_no_committer_when_disabled(
 
 async def test_concurrent_removes_completed_tasks(handler: KafkaConcurrentHandler) -> None:
     task: typing.Final = asyncio.create_task(asyncio.sleep(0.1))
-    await asyncio.sleep(0.3)
+    await task
     handler._current_tasks.add(task)
     await handler._check_tasks_health()
     assert len(handler._current_tasks) == 0
@@ -350,7 +323,7 @@ async def test_concurrent_health_check_discards_done_tasks_without_releasing_lim
 async def test_concurrent_logs_found_tasks(handler: KafkaConcurrentHandler, caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO)
     task: typing.Final = asyncio.create_task(asyncio.sleep(0.1))
-    await asyncio.sleep(0.2)
+    await task
     handler._current_tasks.add(task)
     await handler._check_tasks_health()
     assert "Found completed but not discarded tasks" in caplog.text
@@ -362,6 +335,20 @@ async def test_concurrent_observer_starts(handler: KafkaConcurrentHandler, caplo
     handler._shutdown_event.set()
     await handler.observer()
     assert "Observer task started" in caplog.text
+
+
+async def test_concurrent_observer_zero_interval(handler: KafkaConcurrentHandler) -> None:
+    """Observer with interval=0 should not crash and should call _check_tasks_health."""
+    handler._observer_interval = 0
+
+    with patch.object(handler, "_check_tasks_health", new_callable=AsyncMock) as mock_check:
+
+        async def stop_soon() -> None:
+            await asyncio.sleep(0.05)
+            handler._shutdown_event.set()
+
+        await asyncio.gather(handler.observer(), stop_soon())
+        assert mock_check.called
 
 
 async def test_concurrent_observer_calls_health_check(handler: KafkaConcurrentHandler) -> None:
@@ -575,14 +562,14 @@ async def test_concurrent_full_lifecycle() -> None:
         for i in range(5):
             await handler.handle_task(process_msg(i), record, msg)  # ty: ignore[invalid-argument-type]
 
-        await asyncio.sleep(0.1)
+        await handler.wait_for_subtasks()
         await handler.stop()
 
         assert not handler.is_running
         assert len(processed) > 0
 
 
-async def test_concurrent_concurrent_message_processing() -> None:
+async def test_concurrent_message_processing() -> None:
     target_value: typing.Final = 5
     with patch(
         "faststream_concurrent_aiokafka.batch_committer.KafkaBatchCommitter",
@@ -605,7 +592,7 @@ async def test_concurrent_concurrent_message_processing() -> None:
         for i in range(target_value):
             await handler.handle_task(tracked_task(i), record, msg)  # ty: ignore[invalid-argument-type]
 
-        await asyncio.sleep(0.1)
+        await handler.wait_for_subtasks()
         await handler.stop()
 
         if len(start_times) == target_value and len(end_times) == target_value:
@@ -623,5 +610,6 @@ async def test_concurrent_signal_handling_integration() -> None:
         await handler.start()
 
         handler._signal_handler(signal.SIGTERM)
-        await asyncio.sleep(0.1)
+        assert handler._stop_task is not None
+        await handler._stop_task
         assert not handler.is_running

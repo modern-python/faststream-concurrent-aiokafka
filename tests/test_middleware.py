@@ -16,15 +16,6 @@ from faststream_concurrent_aiokafka.middleware import (
 from faststream_concurrent_aiokafka.processing import KafkaConcurrentHandler
 
 
-@pytest.fixture(autouse=True)
-def reset_singleton() -> typing.Iterator[None]:
-    KafkaConcurrentHandler._instance = None
-    KafkaConcurrentHandler._initialized = False
-    yield
-    KafkaConcurrentHandler._instance = None
-    KafkaConcurrentHandler._initialized = False
-
-
 @pytest_asyncio.fixture
 async def setup_broker() -> KafkaBroker:
     broker: typing.Final = KafkaBroker("localhost:9092")
@@ -50,7 +41,7 @@ async def test_middleware_simple_message_processing(setup_broker: KafkaBroker) -
 
         try:
             await test_broker.publish({"id": 1, "data": "test"}, topic="test-topic")
-            await asyncio.sleep(0.2)
+            await KafkaConcurrentHandler().wait_for_subtasks()
         finally:
             await stop_concurrent_processing(test_broker.context)
 
@@ -73,7 +64,7 @@ async def test_middleware_multiple_messages_parallel(setup_broker: KafkaBroker) 
     async def test(inner_broker: KafkaBroker) -> None:
         for i in range(expected_size):
             await inner_broker.publish({"id": i}, topic="parallel-topic")
-        await asyncio.sleep(0.2)
+        await KafkaConcurrentHandler().wait_for_subtasks()
 
     await initialize_concurrent_processing(
         context=setup_broker.context, commit_batch_size=10, commit_batch_timeout_sec=5, concurrency_limit=3
@@ -106,7 +97,7 @@ async def test_middleware_concurrency_limit_enforced(setup_broker: KafkaBroker) 
     async def test(inner_broker: KafkaBroker) -> None:
         for i in range(5):
             await inner_broker.publish({"id": i}, topic="limited-topic")
-        await asyncio.sleep(0.15)
+        await KafkaConcurrentHandler().wait_for_subtasks()
 
     await initialize_concurrent_processing(
         context=setup_broker.context, commit_batch_size=10, commit_batch_timeout_sec=5, concurrency_limit=2
@@ -138,7 +129,7 @@ async def test_middleware_handler_singleton_persists(setup_broker: KafkaBroker) 
         try:
             for i in range(3):
                 await test_broker.publish({"id": i}, topic="singleton-topic")
-            await asyncio.sleep(0.2)
+            await KafkaConcurrentHandler().wait_for_subtasks()
         finally:
             await stop_concurrent_processing(test_broker.context)
 
@@ -177,7 +168,7 @@ async def test_middleware_message_filtering_by_group_header(setup_broker: KafkaB
                 headers={"topic_group": "target-group"},
             )
             await test_broker.publish({"id": third_id}, topic="filtered-topic")
-            await asyncio.sleep(0.2)
+            await KafkaConcurrentHandler().wait_for_subtasks()
         finally:
             await stop_concurrent_processing(test_broker.context)
 
@@ -244,7 +235,7 @@ async def test_middleware_unhealthy_handler_raises(setup_broker: KafkaBroker, ca
         with pytest.raises(RuntimeError, match="Concurrent processing is not running"):
             await test_broker.publish({"id": 1}, topic="unhealthy-topic")
 
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0)
         await stop_concurrent_processing(test_broker.context)
 
 
@@ -277,7 +268,7 @@ async def test_middleware_no_kafka_message_with_batch_processing_raises(
         with pytest.raises(RuntimeError, match="No kafka message in the middleware"):
             await test_broker.publish({"id": 1}, topic="no-kafka-msg-topic")
 
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0)
         await stop_concurrent_processing(test_broker.context)
 
 
@@ -314,7 +305,7 @@ async def test_middleware_batch_processing_disabled_no_committer(setup_broker: K
         try:
             for i in range(expected_size):
                 await test_broker.publish({"id": i}, topic="no-batch-topic")
-            await asyncio.sleep(0.2)
+            await KafkaConcurrentHandler().wait_for_subtasks()
         finally:
             await stop_concurrent_processing(test_broker.context)
 
@@ -352,7 +343,7 @@ async def test_middleware_handler_exception_logged_not_crashed(
 
         try:
             await test_broker.publish({"id": 1}, topic="handler-error-topic")
-            await asyncio.sleep(0.2)
+            await KafkaConcurrentHandler().wait_for_subtasks()
         finally:
             await stop_concurrent_processing(test_broker.context)
 
@@ -379,14 +370,32 @@ async def test_middleware_concurrency_limiter_release_on_error(setup_broker: Kaf
 
         try:
             await test_broker.publish({"id": 1}, topic="limiter-error-topic")
-            await asyncio.sleep(0.1)
+            await KafkaConcurrentHandler().wait_for_subtasks()
 
             await test_broker.publish({"id": 2}, topic="limiter-error-topic")
-            await asyncio.sleep(0.1)
+            await KafkaConcurrentHandler().wait_for_subtasks()
         finally:
             await stop_concurrent_processing(test_broker.context)
 
     assert len(failed) == expected_fails
+
+
+async def test_middleware_start_stop_reinitialize(setup_broker: KafkaBroker) -> None:
+    """Handler can be stopped and re-initialized; the second instance is fresh and healthy."""
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        await initialize_concurrent_processing(context=test_broker.context, concurrency_limit=5)
+        first_handler: typing.Final = KafkaConcurrentHandler()
+        assert first_handler.is_healthy
+
+        await stop_concurrent_processing(test_broker.context)
+        assert not first_handler.is_running
+
+        await initialize_concurrent_processing(context=test_broker.context, concurrency_limit=3)
+        second_handler: typing.Final = KafkaConcurrentHandler()
+        assert second_handler.is_healthy
+        assert second_handler is not first_handler
+
+        await stop_concurrent_processing(test_broker.context)
 
 
 async def test_middleware_general_exception_wrapped(

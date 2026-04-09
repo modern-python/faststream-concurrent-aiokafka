@@ -5,12 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-just install       # lock + sync all deps (run after pulling or changing pyproject.toml)
-just lint          # eof-fixer, ruff format, ruff check --fix, ty check
-just lint-ci       # same but no auto-fix (used in CI)
-just test          # pytest with coverage
-just test-branch   # pytest with branch coverage
-just publish       # bump version to $GITHUB_REF_NAME, build, publish to PyPI
+just install      # lock + sync all deps (run after pulling or changing pyproject.toml)
+just lint         # eof-fixer, ruff format, ruff check --fix, ty check
+just lint-ci      # same but no auto-fix (used in CI)
+just build        # build the application Docker image
+just test         # run all tests in Docker (starts Redpanda, runs pytest, tears down)
+just test-branch  # same with branch coverage
+just down         # tear down all containers
+just publish      # bump version to $GITHUB_REF_NAME, build, publish to PyPI
 ```
 
 Run a single test file or test by name:
@@ -43,6 +45,19 @@ Runs as a background asyncio task (spawned via `spawn()`). Collects `KafkaCommit
 
 ## Key patterns
 
-- **Singleton reset in tests**: `KafkaConcurrentHandler._initialized = False` and `._instance = None` must be reset between tests. Each test file does this directly in an `autouse` `reset_singleton` fixture — not via `stop_concurrent_processing`.
+- **Singleton reset in tests**: `KafkaConcurrentHandler._initialized = False` and `._instance = None` must be reset between tests. The shared `autouse` `reset_singleton` fixture lives in `tests/conftest.py` — do not re-define it in individual test files.
 - **Type suppression**: use `# ty: ignore[rule-name]` (not `# type: ignore`) for ty type checker suppressions.
 - **No `from __future__ import annotations`**: annotations are evaluated eagerly; `typing.Self`/`typing.Never` are used directly (requires Python ≥ 3.11).
+
+## Integration tests
+
+`tests/test_integration.py` runs against a real Redpanda container (Kafka-compatible, lightweight) via `testcontainers[kafka]`. The container is session-scoped — one instance for the whole test run.
+
+**Running integration tests** requires Docker — they run automatically as part of `just test`.
+
+**Key findings from building these tests:**
+
+- `async with KafkaBroker():` only calls `connect()`, which sets up the producer. It does **not** start subscribers. You must also call `await broker.start()` explicitly to launch the consumer poll tasks.
+- Always use `auto_offset_reset="earliest"` on test subscribers. The default `"latest"` causes the consumer to miss messages published before it gets its partition assignment.
+- Pre-create topics with `AIOKafkaAdminClient` before starting the broker. Auto-creation on first publish triggers a `NotLeaderForPartitionError` retry loop that can outlast short sleeps.
+- After `await broker.start()`, sleep ~1.5 s before publishing to let the consumer join the group and receive partition assignments.

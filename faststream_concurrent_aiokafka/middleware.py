@@ -22,6 +22,7 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
             logger.error("Kafka middleware. There is no concurrent processing instance in the context")
             info = "No concurrent processing instance in the context"
             raise RuntimeError(info)
+
         if not concurrent_processing.is_running:
             logger.error(
                 "Kafka middleware. Concurrent processing is not running. Maybe `initialize_concurrent_processing`"
@@ -29,11 +30,13 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
             )
             info = "Concurrent processing is not running"
             raise RuntimeError(info)
+
         kafka_message: typing.Final = self.context.get("message")
         if concurrent_processing.enable_batch_commit and not kafka_message:
             logger.error("Kafka middleware. No kafka message in the middleware, it means no consumer to commit batch.")
             info = "No kafka message in the middleware"
             raise RuntimeError(info)
+
         try:
 
             async def handler_wrapper() -> typing.Any:  # noqa: ANN401
@@ -46,10 +49,10 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
 
 async def initialize_concurrent_processing(
     context: ContextRepo,
-    commit_batch_size: int,
-    commit_batch_timeout_sec: float,
     concurrency_limit: int = DEFAULT_CONCURRENCY_LIMIT,
     enable_batch_commit: bool = False,
+    commit_batch_size: int = 10,
+    commit_batch_timeout_sec: float = 10.0,
 ) -> None:
     concurrent_processing: typing.Final = KafkaConcurrentHandler(
         commit_batch_size=commit_batch_size,
@@ -82,5 +85,4 @@ async def stop_concurrent_processing(
     await concurrent_processing.stop()
     context.set_global(_PROCESSING_CONTEXT_KEY, None)
 
-    KafkaConcurrentHandler._initialized = False  #  noqa: SLF001
-    KafkaConcurrentHandler._instance = None  #  noqa: SLF001
+    KafkaConcurrentHandler.reset()

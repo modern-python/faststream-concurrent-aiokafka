@@ -1,4 +1,16 @@
-default: install lint test
+default: install lint build test
+
+down:
+    docker compose down --remove-orphans
+
+test *args: build down && down
+    docker compose run application uv run --no-sync pytest {{ args }}
+
+test-branch:
+    @just test --cov-branch
+
+build:
+    docker compose build application
 
 install:
     uv lock --upgrade
@@ -15,12 +27,6 @@ lint-ci:
     uv run ruff format --check
     uv run ruff check --no-fix
     uv run ty check
-
-test *args:
-    uv run --no-sync pytest {{ args }}
-
-test-branch:
-    @just test --cov-branch
 
 publish:
     rm -rf dist

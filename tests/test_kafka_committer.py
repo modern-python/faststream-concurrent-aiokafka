@@ -1,6 +1,7 @@
 # ruff: noqa: SLF001
 import asyncio
 import contextlib
+import logging
 import typing
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,25 +11,7 @@ from faststream.kafka import TopicPartition
 
 from faststream_concurrent_aiokafka import batch_committer
 from faststream_concurrent_aiokafka.batch_committer import CommitterIsDeadError, KafkaBatchCommitter, KafkaCommitTask
-
-
-class MockAIOKafkaConsumer:
-    def __init__(self) -> None:
-        self.commit = AsyncMock()
-        self._group_id = "test-group"
-
-
-class MockAsyncioTask:
-    def __init__(self, result: str | None = None, exception: Exception | None = None, done: bool = True) -> None:
-        self._result: str | None = result
-        self._exception: Exception | None = exception
-        self._done: bool = done
-        self._cancelled: bool = False
-
-    def __await__(self) -> str | None:
-        if self._exception:
-            raise self._exception
-        return self._result
+from tests.mocks import MockAIOKafkaConsumer, MockAsyncioTask
 
 
 @pytest.fixture
@@ -503,6 +486,46 @@ async def test_committer_close_but_timeout_error(caplog: pytest.LogCaptureFixtur
     await asyncio.sleep(0.5)
     assert "Committer main task shutdown timed out, forcing cancellation" in caplog.text
     assert not committer.is_healthy
+
+
+async def test_committer_partial_batch_failure_still_commits(
+    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When one task raises, the batch still commits offsets and the error is logged."""
+    caplog.set_level(logging.ERROR)
+
+    failing_task: typing.Final = MockAsyncioTask(exception=ValueError("handler failed"), done=True)
+    succeeding_task: typing.Final = MockAsyncioTask(result="ok", done=True)
+
+    commit_task1: typing.Final = batch_committer.KafkaCommitTask(
+        asyncio_task=failing_task,  # ty: ignore[invalid-argument-type]
+        offset=100,
+        consumer=mock_consumer,
+        topic_partition=TopicPartition(topic="t1", partition=0),
+    )
+    commit_task2: typing.Final = batch_committer.KafkaCommitTask(
+        asyncio_task=succeeding_task,  # ty: ignore[invalid-argument-type]
+        offset=101,
+        consumer=mock_consumer,
+        topic_partition=TopicPartition(topic="t1", partition=0),
+    )
+
+    # Must put items in queue before calling _commit_tasks_batch so task_done() is balanced
+    await committer._messages_queue.put(commit_task1)
+    await committer._messages_queue.put(commit_task2)
+    batch: typing.Final = [
+        await committer._messages_queue.get(),
+        await committer._messages_queue.get(),
+    ]
+
+    with patch.object(committer, "_call_committer", new_callable=AsyncMock, return_value=True) as mock_commit:
+        await committer._commit_tasks_batch(batch)
+
+    mock_commit.assert_called_once()
+    call_args: typing.Final = mock_commit.call_args[0][1]
+    # Max offset is 101; Kafka commits next-to-fetch offset = max + 1
+    assert call_args[TopicPartition(topic="t1", partition=0)] == 102  # noqa: PLR2004
+    assert "Task has finished with an exception" in caplog.text
 
 
 async def test_committer_close_but_unexpected_error() -> None:
