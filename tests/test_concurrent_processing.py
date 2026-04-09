@@ -56,7 +56,7 @@ class MockKafkaBatchCommitter:
 
 
 @pytest.fixture(autouse=True)
-def reset_singleton() -> typing.Generator[None]:
+def reset_singleton() -> typing.Iterator[None]:
     KafkaConcurrentHandler._instance = None
     KafkaConcurrentHandler._initialized = False
     yield
