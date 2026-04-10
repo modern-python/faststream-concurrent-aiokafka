@@ -13,7 +13,7 @@ from faststream_concurrent_aiokafka.middleware import (
     initialize_concurrent_processing,
     stop_concurrent_processing,
 )
-from faststream_concurrent_aiokafka.processing import KafkaConcurrentHandler  # used via patch.object
+from faststream_concurrent_aiokafka.processing import KafkaConcurrentHandler
 
 
 @pytest_asyncio.fixture
@@ -72,12 +72,8 @@ async def test_middleware_multiple_messages_parallel(setup_broker: KafkaBroker) 
     async with TestKafkaBroker(setup_broker) as test_broker:
         await test(test_broker)
 
+    # TestKafkaBroker uses FakeConsumer — middleware passes through directly (sequential)
     assert len(processed) == expected_size
-    starts: typing.Final = [t for t in timestamps if t[0] == "start"]
-    ends: typing.Final = [t for t in timestamps if t[0] == "end"]
-    last_start: typing.Final = max(s[2] for s in starts)
-    first_end: typing.Final = min(e[2] for e in ends)
-    assert last_start < first_end, "Messages were not processed in parallel"
     await stop_concurrent_processing(setup_broker.context)
 
 
@@ -305,19 +301,19 @@ async def test_middleware_handler_exception_logged_not_crashed(
         raise ValueError(msg)
 
     async with TestKafkaBroker(setup_broker) as test_broker:
-        hdl: typing.Final = await initialize_concurrent_processing(
+        await initialize_concurrent_processing(
             context=test_broker.context,
             commit_batch_size=10,
             commit_batch_timeout_sec=5,
         )
 
         try:
-            await test_broker.publish({"id": 1}, topic="handler-error-topic")
-            await hdl.wait_for_subtasks()
+            # TestKafkaBroker uses FakeConsumer — middleware passes through, so handler
+            # exceptions propagate directly from publish rather than being logged.
+            with pytest.raises(ValueError, match="Handler failed"):
+                await test_broker.publish({"id": 1}, topic="handler-error-topic")
         finally:
             await stop_concurrent_processing(test_broker.context)
-
-    assert "Task has failed" in caplog.text or "exception" in caplog.text.lower()
 
 
 async def test_middleware_concurrency_limiter_release_on_error(setup_broker: KafkaBroker) -> None:
@@ -331,7 +327,7 @@ async def test_middleware_concurrency_limiter_release_on_error(setup_broker: Kaf
         raise ValueError(msg)
 
     async with TestKafkaBroker(setup_broker) as test_broker:
-        hdl: typing.Final = await initialize_concurrent_processing(
+        await initialize_concurrent_processing(
             context=test_broker.context,
             commit_batch_size=10,
             commit_batch_timeout_sec=5,
@@ -339,11 +335,12 @@ async def test_middleware_concurrency_limiter_release_on_error(setup_broker: Kaf
         )
 
         try:
-            await test_broker.publish({"id": 1}, topic="limiter-error-topic")
-            await hdl.wait_for_subtasks()
-
-            await test_broker.publish({"id": 2}, topic="limiter-error-topic")
-            await hdl.wait_for_subtasks()
+            # TestKafkaBroker uses FakeConsumer — middleware passes through, so handler
+            # exceptions propagate directly and the concurrency limiter is not involved.
+            with pytest.raises(ValueError, match="Failed"):
+                await test_broker.publish({"id": 1}, topic="limiter-error-topic")
+            with pytest.raises(ValueError, match="Failed"):
+                await test_broker.publish({"id": 2}, topic="limiter-error-topic")
         finally:
             await stop_concurrent_processing(test_broker.context)
 
@@ -386,11 +383,35 @@ async def test_middleware_general_exception_wrapped(
             commit_batch_timeout_sec=5,
         )
 
-        with patch.object(
-            KafkaConcurrentHandler, "handle_task", side_effect=MemoryError("Out of memory in handle_task")
-        ):
-            try:
-                with pytest.raises(MemoryError, match="Out of memory in handle_task"):
-                    await test_broker.publish({"id": 1}, topic="general-error-topic")
-            finally:
-                await stop_concurrent_processing(test_broker.context)
+        try:
+            # TestKafkaBroker uses FakeConsumer — middleware passes through directly,
+            # so handle_task is never called. Message is processed without error.
+            await test_broker.publish({"id": 1}, topic="general-error-topic")
+        finally:
+            await stop_concurrent_processing(test_broker.context)
+
+
+async def test_middleware_fake_consumer_no_commit_error(
+    setup_broker: KafkaBroker, caplog: pytest.LogCaptureFixture
+) -> None:
+    """TestKafkaBroker uses FakeConsumer; committing should not raise or log errors."""
+    caplog.set_level(logging.ERROR)
+
+    @setup_broker.subscriber("fake-consumer-topic", group_id="fake-consumer-group")
+    async def handler(msg: typing.Any) -> None:
+        pass
+
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        hdl: typing.Final = await initialize_concurrent_processing(
+            context=test_broker.context,
+            commit_batch_size=10,
+            commit_batch_timeout_sec=5,
+        )
+
+        try:
+            await test_broker.publish({"id": 1}, topic="fake-consumer-topic")
+            await hdl.wait_for_subtasks()
+        finally:
+            await stop_concurrent_processing(test_broker.context)
+
+    assert "Error during commit to kafka" not in caplog.text

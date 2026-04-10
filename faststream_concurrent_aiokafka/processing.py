@@ -69,9 +69,6 @@ class KafkaConcurrentHandler:
         task: typing.Final = asyncio.create_task(coroutine)
         self._current_tasks.add(task)
         task.add_done_callback(self._finish_task)
-        if type(kafka_message.consumer).__name__ == "FakeConsumer":
-            return
-
         try:
             await self._committer.send_task(
                 batch_committer.KafkaCommitTask(
