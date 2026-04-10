@@ -10,6 +10,5 @@ if typing.TYPE_CHECKING:
 
 
 def is_kafka_handler_healthy(context: ContextRepo) -> bool:
-    """Return True if the KafkaConcurrentHandler stored in *context* is healthy."""
-    handler: typing.Final[KafkaConcurrentHandler | None] = context.get(_PROCESSING_CONTEXT_KEY)
+    handler: KafkaConcurrentHandler | None = context.get(_PROCESSING_CONTEXT_KEY)
     return handler is not None and handler.is_healthy
