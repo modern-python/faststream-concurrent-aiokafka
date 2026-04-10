@@ -37,7 +37,11 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
             )
             raise RuntimeError(err)
 
+        if type(kafka_message.consumer).__name__ == "FakeConsumer":
+            return await call_next(msg)
+
         await concurrent_processing.handle_task(call_next(msg), self.msg, kafka_message)
+        return None
 
 
 async def initialize_concurrent_processing(
