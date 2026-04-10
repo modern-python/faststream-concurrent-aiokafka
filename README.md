@@ -17,6 +17,7 @@ By default FastStream processes Kafka messages sequentially — one message at a
 - Signal handling (SIGTERM / SIGINT / SIGQUIT) triggers graceful shutdown
 - Background observer task to detect and discard stale completed tasks
 - Handler exceptions are logged but do not crash the consumer
+- Health check helper to probe handler status from a `ContextRepo`
 
 ## 📦 [PyPi](https://pypi.org/project/faststream-concurrent-aiokafka)
 
@@ -41,6 +42,7 @@ from faststream.middlewares import AckPolicy
 from faststream_concurrent_aiokafka import (
     KafkaConcurrentProcessingMiddleware,
     initialize_concurrent_processing,
+    is_kafka_handler_healthy,
     stop_concurrent_processing,
 )
 
@@ -105,6 +107,10 @@ Returns the `KafkaConcurrentHandler` instance.
 ### `stop_concurrent_processing(context)`
 
 Flush pending commits, wait for in-flight tasks (up to 10 s), then stop the handler.
+
+### `is_kafka_handler_healthy(context)`
+
+Returns `True` if the `KafkaConcurrentHandler` stored in `context` is running and healthy, `False` otherwise (not initialized, stopped, or observer task dead). Useful for readiness/liveness probes.
 
 ### `KafkaConcurrentProcessingMiddleware`
 
