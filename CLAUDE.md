@@ -40,6 +40,9 @@ Key design: `handle_task()` fires-and-forgets coroutines as asyncio tasks. Messa
 - `initialize_concurrent_processing(context, ...)`: call on app startup to create and start the handler, storing it in FastStream's global context.
 - `stop_concurrent_processing(context)`: call on app shutdown; resets the singleton so it can be re-initialized (important for tests).
 
+**`healthcheck.py` — `is_kafka_handler_healthy`**
+A single function that accepts a `ContextRepo` and returns `True` if the `KafkaConcurrentHandler` is present and healthy. Intended for readiness/liveness probes.
+
 **`batch_committer.py` — `KafkaBatchCommitter`**
 Runs as a background asyncio task (spawned via `spawn()`). Collects `KafkaCommitTask` objects from a queue, batches them by topic-partition, waits for each task's asyncio future to complete, then commits the max offset per partition to Kafka. Batching is triggered by timeout or batch size, whichever comes first. `CommitterIsDeadError` is raised to callers if the committer's main task has died.
 
