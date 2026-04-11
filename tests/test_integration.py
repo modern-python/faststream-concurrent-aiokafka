@@ -1,9 +1,12 @@
 import asyncio
+import contextlib
 import typing
 import uuid
 
 from aiokafka.admin import AIOKafkaAdminClient, NewTopic
-from faststream.kafka import KafkaBroker
+from faststream import ContextRepo
+from faststream.asgi import AsgiFastStream
+from faststream.kafka import KafkaBroker, KafkaRouter
 from faststream.middlewares import AckPolicy
 
 from faststream_concurrent_aiokafka import (
@@ -360,3 +363,69 @@ async def test_real_kafka_multi_subscriber_commits_all_offsets(kafka_bootstrap_s
 
     assert replayed_a == [], f"topic_a messages replayed after clean stop: {replayed_a}"
     assert replayed_b == [], f"topic_b messages replayed after clean stop: {replayed_b}"
+
+
+async def test_middleware_on_router(kafka_bootstrap_servers: str) -> None:
+    """Middleware set on a KafkaRouter (not broker-level) routes messages through concurrent handler."""
+    processed: typing.Final[list[dict[str, int]]] = []
+    topic: typing.Final = _topic("router-mw")
+    # Plain broker — no broker-level middleware; middleware is scoped to the router
+    broker: typing.Final = KafkaBroker(kafka_bootstrap_servers)
+    router: typing.Final = KafkaRouter(middlewares=[KafkaConcurrentProcessingMiddleware])
+
+    @router.subscriber(topic, group_id="router-mw-group", auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
+    async def handler(msg: dict[str, int]) -> None:
+        processed.append(msg)
+
+    broker.include_router(router)
+
+    await _create_topic(kafka_bootstrap_servers, topic)
+    async with broker:
+        await broker.start()
+        await initialize_concurrent_processing(
+            context=broker.context, commit_batch_size=10, commit_batch_timeout_sec=5, concurrency_limit=5
+        )
+        await asyncio.sleep(CONSUMER_READY_SLEEP)
+        try:
+            await broker.publish({"id": 7}, topic=topic)
+            await asyncio.sleep(POLL_SLEEP)
+        finally:
+            await stop_concurrent_processing(broker.context)
+
+    assert len(processed) == 1
+    assert processed[0]["id"] == 7
+
+
+async def test_asgi_faststream_basic_processing(kafka_bootstrap_servers: str) -> None:
+    """AsgiFastStream lifespan initialises and stops concurrent processing correctly."""
+    processed: typing.Final[list[dict[str, int]]] = []
+    topic: typing.Final = _topic("asgi")
+    broker: typing.Final = _broker(kafka_bootstrap_servers)
+
+    @broker.subscriber(topic, group_id="asgi-group", auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
+    async def handler(msg: dict[str, int]) -> None:
+        processed.append(msg)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_context: ContextRepo) -> typing.AsyncIterator[None]:
+        # AsgiFastStream injects its own app-level context, which is separate from
+        # broker.context. Use broker.context explicitly so the middleware can find
+        # the handler via self.context.
+        await initialize_concurrent_processing(
+            context=broker.context, commit_batch_size=10, commit_batch_timeout_sec=5, concurrency_limit=5
+        )
+        try:
+            yield
+        finally:
+            await stop_concurrent_processing(broker.context)
+
+    app: typing.Final = AsgiFastStream(broker, lifespan=lifespan)
+
+    await _create_topic(kafka_bootstrap_servers, topic)
+    async with app.start_lifespan_context():
+        await asyncio.sleep(CONSUMER_READY_SLEEP)
+        await broker.publish({"id": 42}, topic=topic)
+        await asyncio.sleep(POLL_SLEEP)
+
+    assert len(processed) == 1
+    assert processed[0]["id"] == 42

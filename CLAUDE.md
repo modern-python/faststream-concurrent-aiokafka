@@ -64,3 +64,6 @@ Runs as a background asyncio task (spawned via `spawn()`). Collects `KafkaCommit
 - Always use `auto_offset_reset="earliest"` on test subscribers. The default `"latest"` causes the consumer to miss messages published before it gets its partition assignment.
 - Pre-create topics with `AIOKafkaAdminClient` before starting the broker. Auto-creation on first publish triggers a `NotLeaderForPartitionError` retry loop that can outlast short sleeps.
 - After `await broker.start()`, sleep ~1.5 s before publishing to let the consumer join the group and receive partition assignments.
+- `AsgiFastStream` lifespan tests must use `async with app.start_lifespan_context()` — calling `app.start()` / `app.stop()` bypasses the `lifespan` context manager entirely.
+- `AsgiFastStream` injects its own app-level `ContextRepo` into the lifespan, separate from `broker.context`. Pass `broker.context` explicitly to `initialize_concurrent_processing` and `stop_concurrent_processing`.
+- Subscriber-level `middlewares` on `@broker.subscriber(...)` takes `SubscriberMiddleware` (a plain `(call_next, msg)` callable), not `BaseMiddleware` subclasses. To scope `KafkaConcurrentProcessingMiddleware` to a subset of subscribers, use `KafkaRouter(middlewares=[KafkaConcurrentProcessingMiddleware])` and `broker.include_router(router)`.

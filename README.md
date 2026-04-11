@@ -35,40 +35,50 @@ pip install faststream-concurrent-aiokafka
 `ack_policy=AckPolicy.MANUAL` is **required** on every subscriber — the middleware enforces this at runtime.
 Without it, aiokafka's auto-commit timer would commit offsets before processing tasks complete, causing silent message loss on crash.
 
+> **`AsgiFastStream` note**: its lifespan receives an app-level `ContextRepo` separate from `broker.context`. Pass `broker.context` explicitly instead of the injected argument.
+
 ```python
-from faststream import FastStream, ContextRepo
-from faststream.kafka import KafkaBroker
+from contextlib import asynccontextmanager
+from faststream import ContextRepo
+from faststream.asgi import AsgiFastStream
+from faststream.kafka import KafkaBroker, KafkaRouter
 from faststream.middlewares import AckPolicy
 from faststream_concurrent_aiokafka import (
     KafkaConcurrentProcessingMiddleware,
     initialize_concurrent_processing,
-    is_kafka_handler_healthy,
     stop_concurrent_processing,
 )
 
+# Middleware applied globally to all subscribers
 broker = KafkaBroker(middlewares=[KafkaConcurrentProcessingMiddleware])
-app = FastStream(broker)
 
+# Or scope it to specific subscribers via a router
+router = KafkaRouter(middlewares=[KafkaConcurrentProcessingMiddleware])
 
-@app.on_startup
-async def on_startup(context: ContextRepo) -> None:
+@asynccontextmanager
+async def lifespan(_context: ContextRepo):
     await initialize_concurrent_processing(
-        context=context,
-        concurrency_limit=20,       # max concurrent tasks (minimum: 1)
-        commit_batch_size=100,      # commit after this many completed tasks
-        commit_batch_timeout_sec=5.0,  # or after this many seconds
+        context=broker.context,
+        concurrency_limit=20,         # max concurrent tasks (minimum: 1)
+        commit_batch_size=100,        # commit after this many completed tasks
+        commit_batch_timeout_sec=5.0, # or after this many seconds
     )
+    try:
+        yield
+    finally:
+        await stop_concurrent_processing(broker.context)
 
-
-@app.on_shutdown
-async def on_shutdown(context: ContextRepo) -> None:
-    await stop_concurrent_processing(context)
-
+app = AsgiFastStream(broker, lifespan=lifespan)
 
 @broker.subscriber("my-topic", group_id="my-group", ack_policy=AckPolicy.MANUAL)
 async def handle(msg: str) -> None:
-    # runs concurrently with other messages
     ...
+
+@router.subscriber("other-topic", group_id="other-group", ack_policy=AckPolicy.MANUAL)
+async def handle_other(msg: str) -> None:
+    ...
+
+broker.include_router(router)
 ```
 
 ## Core Concepts
@@ -114,7 +124,7 @@ Returns `True` if the `KafkaConcurrentHandler` stored in `context` is running an
 
 ### `KafkaConcurrentProcessingMiddleware`
 
-FastStream middleware class. Pass it to `KafkaBroker(middlewares=[...])` or `broker.add_middleware(...)`.
+FastStream middleware class. Pass it to `KafkaBroker(middlewares=[...])`, `broker.add_middleware(...)`, or scope it to a subset of subscribers via `KafkaRouter`. See Quick Start for usage examples.
 
 ## How It Works
 
