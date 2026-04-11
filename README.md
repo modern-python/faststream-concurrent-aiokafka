@@ -126,6 +126,8 @@ Returns `True` if the `KafkaConcurrentHandler` stored in `context` is running an
 
 FastStream middleware class. Pass it to `KafkaBroker(middlewares=[...])`, `broker.add_middleware(...)`, or scope it to a subset of subscribers via `KafkaRouter`. See Quick Start for usage examples.
 
+> **Must be listed first** in any middleware list. `consume_scope` fires the handler as a background task and returns `None` immediately — any middleware wrapping it on the outside would see that premature return and misfire (wrong timing, missed exceptions, early cleanup). Middlewares listed after it run correctly inside the background task.
+
 ## How It Works
 
 1. **Message dispatch**: On each incoming message, `consume_scope` calls `handle_task()`, which acquires a semaphore slot then fires the handler coroutine as a background `asyncio.Task`.
