@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import functools
 import logging
 import signal
@@ -10,6 +9,7 @@ from faststream.kafka.message import KafkaAckableMessage
 
 from faststream_concurrent_aiokafka import batch_committer
 from faststream_concurrent_aiokafka.batch_committer import KafkaBatchCommitter
+from faststream_concurrent_aiokafka.rebalance import ConsumerRebalanceListener
 
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 SIGNALS: typing.Final = (signal.SIGTERM, signal.SIGINT, signal.SIGQUIT)
 GRACEFUL_TIMEOUT_SEC: typing.Final[int] = 10
-DEFAULT_OBSERVER_INTERVAL_SEC: typing.Final[float] = 5.0
 DEFAULT_CONCURRENCY_LIMIT: typing.Final = 10
 
 
@@ -26,7 +25,6 @@ class KafkaConcurrentHandler:
         self,
         committer: KafkaBatchCommitter,
         concurrency_limit: int = DEFAULT_CONCURRENCY_LIMIT,
-        observer_interval: float = DEFAULT_OBSERVER_INTERVAL_SEC,
     ) -> None:
         if concurrency_limit < 1:
             msg = f"concurrency_limit must be >= 1, got {concurrency_limit}"
@@ -34,12 +32,7 @@ class KafkaConcurrentHandler:
 
         self._limiter = asyncio.Semaphore(concurrency_limit)
         self._current_tasks: set[asyncio.Task[typing.Any]] = set()
-
-        self._observer_task: asyncio.Task[typing.Any] | None = None
-        self._shutdown_event: asyncio.Event = asyncio.Event()
-        self._observer_interval: float = observer_interval
         self._is_running: bool = False
-
         self._committer: KafkaBatchCommitter = committer
         self._stop_task: asyncio.Task[typing.Any] | None = None
 
@@ -83,25 +76,6 @@ class KafkaConcurrentHandler:
             await self.stop()
             raise
 
-    async def _check_tasks_health(self) -> None:
-        done_tasks: typing.Final = {t for t in self._current_tasks if t.done()}
-        self._current_tasks -= done_tasks
-        if done_tasks:
-            logger.info(f"Kafka middleware. Found completed but not discarded tasks, amount: {len(done_tasks)}")
-
-    async def observer(self) -> None:
-        """Background observer task that monitors system health."""
-        logger.info("Kafka middleware. Observer task started")
-
-        while not self._shutdown_event.is_set():
-            try:
-                await asyncio.wait_for(
-                    self._shutdown_event.wait(),
-                    timeout=self._observer_interval,
-                )
-            except TimeoutError:
-                await self._check_tasks_health()
-
     def _setup_signal_handlers(self) -> None:
         loop: typing.Final = asyncio.get_running_loop()
         for sig in SIGNALS:
@@ -121,10 +95,8 @@ class KafkaConcurrentHandler:
 
         logger.info("Kafka middleware. Start middleware handler")
         self._is_running = True
-        self._shutdown_event.clear()
 
         self._committer.spawn()
-        self._observer_task = asyncio.create_task(self.observer())
         self._setup_signal_handlers()
         logger.info("Kafka middleware is ready to process messages.")
 
@@ -133,13 +105,8 @@ class KafkaConcurrentHandler:
             return
         logger.info("Kafka middleware. Shutting down middleware handler")
         self._is_running = False
-        self._shutdown_event.set()
 
         await self._committer.close()
-        if self._observer_task and not self._observer_task.done():
-            self._observer_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._observer_task
         await self.wait_for_subtasks()
 
         try:
@@ -157,19 +124,20 @@ class KafkaConcurrentHandler:
         tasks = list(self._current_tasks)
         for task in tasks:
             task.cancel()
-        if self._observer_task and not self._observer_task.done():
-            self._observer_task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._current_tasks.clear()
 
+    def create_rebalance_listener(self) -> ConsumerRebalanceListener:
+        """Return a ConsumerRebalanceListener that flushes pending commits on partition revocation.
+
+        Pass the returned listener to ``@broker.subscriber(..., listener=listener)`` so that
+        in-flight offsets are committed before Kafka hands the partition to another consumer.
+        """
+        return ConsumerRebalanceListener(self._committer)
+
     @property
     def is_healthy(self) -> bool:
-        return (
-            self._is_running
-            and self._observer_task is not None
-            and not self._observer_task.done()
-            and self._committer.is_healthy
-        )
+        return self._is_running and self._committer.is_healthy
 
     @property
     def is_running(self) -> bool:

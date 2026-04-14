@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
+from aiokafka.errors import CommitFailedError, KafkaError
 from faststream.kafka import TopicPartition
 
 from faststream_concurrent_aiokafka import batch_committer
@@ -187,6 +188,7 @@ async def test_committer_collects_batch_size(committer: KafkaBatchCommitter, sam
 
 
 async def test_committer_returns_on_flush_event(committer: KafkaBatchCommitter, sample_task: KafkaCommitTask) -> None:
+    """commit_all() flushes without stopping the loop (should_shutdown stays False)."""
     committer._commit_batch_timeout_sec = 10.0
 
     for _ in range(6):
@@ -195,6 +197,22 @@ async def test_committer_returns_on_flush_event(committer: KafkaBatchCommitter, 
 
     tasks, should_shutdown = await committer._populate_commit_batch()
     assert len(tasks) > committer._commit_batch_size
+    assert should_shutdown is False
+
+
+async def test_committer_returns_shutdown_on_close_flush(
+    committer: KafkaBatchCommitter, sample_task: KafkaCommitTask
+) -> None:
+    """close() sets _stop_requested so flush triggers shutdown."""
+    committer._commit_batch_timeout_sec = 10.0
+    committer._stop_requested = True
+
+    for _ in range(2):
+        await committer._messages_queue.put(sample_task)
+    committer._flush_batch_event.set()
+
+    tasks, should_shutdown = await committer._populate_commit_batch()
+    assert len(tasks) == 2
     assert should_shutdown is True
 
 
@@ -243,9 +261,10 @@ async def test_committer_commits_to_kafka(committer: KafkaBatchCommitter, mock_c
     assert call_args == partitions_to_offsets
 
 
-async def test_committer_retries_on_commit_failure(
+async def test_committer_retries_on_kafka_error(
     committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer, sample_task: KafkaCommitTask
 ) -> None:
+    """KafkaError re-queues the batch for retry on the next cycle."""
     mock_task: typing.Final = MockAsyncioTask(result="success")
     sample_task = KafkaCommitTask(
         asyncio_task=mock_task,  # ty: ignore[invalid-argument-type]
@@ -253,7 +272,7 @@ async def test_committer_retries_on_commit_failure(
         consumer=mock_consumer,
         topic_partition=TopicPartition(topic="test-topic", partition=0),
     )
-    mock_consumer.commit.side_effect = Exception("Kafka unavailable")
+    mock_consumer.commit.side_effect = KafkaError("transient broker error")
 
     partitions_to_offsets: typing.Final = {sample_task.topic_partition: 101}
 
@@ -263,6 +282,19 @@ async def test_committer_retries_on_commit_failure(
     assert not committer._messages_queue.empty()
     requeued_task: typing.Final = await committer._messages_queue.get()
     assert requeued_task == sample_task
+
+
+async def test_committer_ignores_commit_failed_error(
+    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer, sample_task: KafkaCommitTask
+) -> None:
+    """CommitFailedError (rebalance in progress) is silently ignored — no re-queue."""
+    mock_consumer.commit.side_effect = CommitFailedError()
+    partitions_to_offsets: typing.Final = {sample_task.topic_partition: 101}
+
+    result: typing.Final = await committer._call_committer([sample_task], partitions_to_offsets)
+
+    assert result is False
+    assert committer._messages_queue.empty()
 
 
 async def test_committer_waits_for_all_tasks(
@@ -569,3 +601,137 @@ async def test_committer_close_but_unexpected_error() -> None:
         await committer.close()
 
     assert exc_info.value is original_exception
+
+
+async def test_committer_cancelled_task_stops_offset_advance(
+    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
+) -> None:
+    """Offset must not advance past a cancelled task — that message was never processed."""
+    ok_task: typing.Final = MockAsyncioTask(result="ok")
+    cancelled_task: typing.Final = MockAsyncioTask(cancelled=True)
+    later_ok_task: typing.Final = MockAsyncioTask(result="ok")
+
+    tp: typing.Final = TopicPartition(topic="t1", partition=0)
+    commit_task_ok: typing.Final = KafkaCommitTask(
+        asyncio_task=ok_task,  # ty: ignore[invalid-argument-type]
+        offset=10,
+        consumer=mock_consumer,
+        topic_partition=tp,
+    )
+    commit_task_cancelled: typing.Final = KafkaCommitTask(
+        asyncio_task=cancelled_task,  # ty: ignore[invalid-argument-type]
+        offset=11,
+        consumer=mock_consumer,
+        topic_partition=tp,
+    )
+    commit_task_later: typing.Final = KafkaCommitTask(
+        asyncio_task=later_ok_task,  # ty: ignore[invalid-argument-type]
+        offset=12,
+        consumer=mock_consumer,
+        topic_partition=tp,
+    )
+
+    for t in (commit_task_ok, commit_task_cancelled, commit_task_later):
+        await committer._messages_queue.put(t)
+    batch: typing.Final = [await committer._messages_queue.get() for _ in range(3)]
+
+    with patch.object(committer, "_call_committer", new_callable=AsyncMock, return_value=True) as mock_commit:
+        await committer._commit_tasks_batch(batch)
+
+    offsets: typing.Final = mock_commit.call_args[0][1]
+    # Only offset 10 is safe to commit; 11 was cancelled, 12 is beyond it
+    assert offsets[tp] == 11  # max safe offset (10) + 1
+
+
+async def test_committer_all_cancelled_tasks_skips_commit(
+    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
+) -> None:
+    """If all tasks on a partition are cancelled, nothing is committed for that partition."""
+    tp: typing.Final = TopicPartition(topic="t1", partition=0)
+    cancelled_task: typing.Final = MockAsyncioTask(cancelled=True)
+    commit_task: typing.Final = KafkaCommitTask(
+        asyncio_task=cancelled_task,  # ty: ignore[invalid-argument-type]
+        offset=5,
+        consumer=mock_consumer,
+        topic_partition=tp,
+    )
+
+    await committer._messages_queue.put(commit_task)
+    batch: typing.Final = [await committer._messages_queue.get()]
+
+    with patch.object(committer, "_call_committer", new_callable=AsyncMock, return_value=True) as mock_commit:
+        await committer._commit_tasks_batch(batch)
+
+    offsets: typing.Final = mock_commit.call_args[0][1]
+    assert tp not in offsets
+
+
+async def test_committer_cancelled_task_not_logged_as_error(
+    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer, caplog: pytest.LogCaptureFixture
+) -> None:
+    """CancelledError from a task is expected during shutdown and must not be logged as an error."""
+    caplog.set_level(logging.ERROR)
+    cancelled_task: typing.Final = MockAsyncioTask(cancelled=True)
+    commit_task: typing.Final = KafkaCommitTask(
+        asyncio_task=cancelled_task,  # ty: ignore[invalid-argument-type]
+        offset=5,
+        consumer=mock_consumer,
+        topic_partition=TopicPartition(topic="t1", partition=0),
+    )
+
+    await committer._messages_queue.put(commit_task)
+    batch: typing.Final = [await committer._messages_queue.get()]
+
+    with patch.object(committer, "_call_committer", new_callable=AsyncMock, return_value=True):
+        await committer._commit_tasks_batch(batch)
+
+    assert "Task has finished with an exception" not in caplog.text
+
+
+async def test_committer_commit_tasks_batch_returns_false_on_commit_failure(
+    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
+) -> None:
+    """_commit_tasks_batch returns False when _call_committer fails."""
+    task: typing.Final = MockAsyncioTask(result="ok")
+    commit_task: typing.Final = KafkaCommitTask(
+        asyncio_task=task,  # ty: ignore[invalid-argument-type]
+        offset=1,
+        consumer=mock_consumer,
+        topic_partition=TopicPartition(topic="t", partition=0),
+    )
+    await committer._messages_queue.put(commit_task)
+    batch: typing.Final = [await committer._messages_queue.get()]
+
+    with patch.object(committer, "_call_committer", new_callable=AsyncMock, return_value=False):
+        result: typing.Final = await committer._commit_tasks_batch(batch)
+
+    assert result is False
+
+
+async def test_committer_commit_all_does_not_stop_loop(committer: KafkaBatchCommitter) -> None:
+    """commit_all() must flush without shutting down the committer (for rebalance use)."""
+    committer.spawn()
+
+    async def noop() -> None:
+        pass
+
+    real_task: typing.Final = asyncio.create_task(noop())
+    commit_task: typing.Final = KafkaCommitTask(
+        asyncio_task=real_task,
+        offset=1,
+        consumer=MockAIOKafkaConsumer(),
+        topic_partition=TopicPartition(topic="t", partition=0),
+    )
+
+    with patch.object(committer, "_commit_tasks_batch", new_callable=AsyncMock) as mock_commit:
+
+        async def side_effect(batch: list[KafkaCommitTask]) -> bool:
+            for _ in batch:
+                committer._messages_queue.task_done()
+            return True
+
+        mock_commit.side_effect = side_effect
+        await committer.send_task(commit_task)
+        await committer.commit_all()
+
+    assert committer.is_healthy  # still running after flush
