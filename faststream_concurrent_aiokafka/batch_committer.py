@@ -1,10 +1,10 @@
 import asyncio
 import contextlib
 import dataclasses
-import itertools
 import logging
 import typing
 
+from aiokafka.errors import CommitFailedError, KafkaError
 from faststream.kafka import TopicPartition
 
 
@@ -38,6 +38,7 @@ class KafkaBatchCommitter:
         self._messages_queue: asyncio.Queue[KafkaCommitTask] = asyncio.Queue()
         self._commit_task: asyncio.Task[typing.Any] | None = None
         self._flush_batch_event = asyncio.Event()
+        self._stop_requested: bool = False
 
         self._commit_batch_timeout_sec = commit_batch_timeout_sec
         self._commit_batch_size = commit_batch_size
@@ -77,11 +78,11 @@ class KafkaBatchCommitter:
                 else:
                     queue_get_task.cancel()
 
-                # commit_all was called — flush remaining queue items and stop
+                # flush event — drain remaining queue items; stop only if close() was called
                 if flush_wait_task in done:
                     uncommited_tasks.extend(self._flush_tasks_queue())
                     self._flush_batch_event.clear()
-                    should_shutdown = True
+                    should_shutdown = self._stop_requested
                     break
 
                 if timeout_task in done:
@@ -104,25 +105,35 @@ class KafkaBatchCommitter:
     ) -> bool:
         if not partitions_to_offsets:
             return True
-        commit_succeeded = True
         consumer: typing.Final[AIOKafkaConsumer] = tasks_batch[0].consumer
         try:
             await consumer.commit(partitions_to_offsets)
-        except Exception as exc:
-            commit_succeeded = False
-            logger.exception("Error during commit to kafka", exc_info=exc)
+        except CommitFailedError:
+            # Partition reassignment in progress — safe to ignore, offsets will be re-committed
+            logger.exception("Cannot commit due to rebalancing, ignoring batch")
+            return False
+        except KafkaError:
+            # Transient error — re-queue batch for retry on next cycle
+            logger.exception("Error during commit to kafka, re-queuing batch")
             for task in tasks_batch:
                 await self._messages_queue.put(task)
-        return commit_succeeded
+            return False
+        else:
+            return True
 
     @staticmethod
     def _map_offsets_per_partition(consumer_tasks: list[KafkaCommitTask]) -> dict[TopicPartition, int]:
-        partitions_to_tasks = itertools.groupby(
-            sorted(consumer_tasks, key=lambda x: x.topic_partition), lambda x: x.topic_partition
-        )
+        by_partition: dict[TopicPartition, list[KafkaCommitTask]] = {}
+        for task in consumer_tasks:
+            by_partition.setdefault(task.topic_partition, []).append(task)
+
         partitions_to_offsets: dict[TopicPartition, int] = {}
-        for partition, partition_tasks in partitions_to_tasks:
-            max_offset = max((task.offset for task in partition_tasks), default=None)
+        for partition, tasks in by_partition.items():
+            max_offset: int | None = None
+            for task in sorted(tasks, key=lambda x: x.offset):
+                if task.asyncio_task.cancelled():
+                    break  # stop committing at first cancelled task — message was not processed
+                max_offset = task.offset
             if max_offset is not None:
                 # Kafka commits the *next* offset to fetch, so committed = processed_max + 1
                 partitions_to_offsets[partition] = max_offset + 1
@@ -133,7 +144,7 @@ class KafkaBatchCommitter:
             *[task.asyncio_task for task in tasks_batch], return_exceptions=True
         )
         for result in results:
-            if isinstance(result, BaseException):
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
                 logger.error("Task has finished with an exception", exc_info=result)
 
         # Group by consumer instance — each AIOKafkaConsumer can only commit its own partitions
@@ -159,15 +170,17 @@ class KafkaBatchCommitter:
                 await self._commit_tasks_batch(commit_batch)
 
     async def commit_all(self) -> None:
-        """Flush and commit all pending tasks, then stop the committer loop."""
+        """Flush and commit all pending tasks without stopping the committer loop.
+
+        Safe to call during Kafka rebalance (on_partitions_revoked). The committer
+        continues running after this returns.
+        """
         self._flush_batch_event.set()
         await self._messages_queue.join()
 
     async def send_task(self, new_task: KafkaCommitTask) -> None:
         self._check_is_commit_task_running()
-        await self._messages_queue.put(
-            new_task,
-        )
+        await self._messages_queue.put(new_task)
 
     def spawn(self) -> None:
         if not self._commit_task:
@@ -176,11 +189,12 @@ class KafkaBatchCommitter:
             logger.error("Committer main task already running")
 
     async def close(self) -> None:
-        """Close committer."""
+        """Flush all pending tasks and shut down the committer."""
         if not self._commit_task:
             logger.error("Committer main task is not running, cannot close committer properly")
             return
 
+        self._stop_requested = True
         self._flush_batch_event.set()
         try:
             await asyncio.wait_for(self._commit_task, timeout=self._shutdown_timeout)

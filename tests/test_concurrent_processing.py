@@ -11,6 +11,7 @@ import pytest_asyncio
 
 from faststream_concurrent_aiokafka.batch_committer import CommitterIsDeadError
 from faststream_concurrent_aiokafka.processing import KafkaConcurrentHandler
+from faststream_concurrent_aiokafka.rebalance import ConsumerRebalanceListener
 from tests.mocks import MockConsumerRecord, MockKafkaBatchCommitter, MockKafkaMessage
 
 
@@ -165,87 +166,6 @@ async def test_concurrent_handles_committer_dead_error(
     assert not handler._is_running
 
 
-async def test_concurrent_removes_completed_tasks(handler: KafkaConcurrentHandler) -> None:
-    task: typing.Final = asyncio.create_task(asyncio.sleep(0.1))
-    await task
-    handler._current_tasks.add(task)
-    await handler._check_tasks_health()
-    assert len(handler._current_tasks) == 0
-
-
-async def test_concurrent_keeps_running_tasks(handler: KafkaConcurrentHandler) -> None:
-    task: typing.Final = asyncio.create_task(asyncio.sleep(10))
-    handler._current_tasks.add(task)
-    await handler._check_tasks_health()
-    assert len(handler._current_tasks) == 1
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
-
-
-async def test_concurrent_health_check_discards_done_tasks_without_releasing_limiter(
-    handler_with_limit: KafkaConcurrentHandler,
-) -> None:
-    handler: typing.Final = handler_with_limit
-
-    async def quick_task() -> str:
-        return "done"
-
-    task: typing.Final = asyncio.create_task(quick_task())
-    handler._current_tasks.add(task)
-    await asyncio.sleep(0)
-    assert handler._limiter
-    initial_value: typing.Final = handler._limiter._value
-    await handler._check_tasks_health()
-    assert task not in handler._current_tasks
-    assert handler._limiter
-    assert handler._limiter._value == initial_value  # limiter released only by _finish_task callback
-
-
-async def test_concurrent_logs_found_tasks(handler: KafkaConcurrentHandler, caplog: pytest.LogCaptureFixture) -> None:
-    caplog.set_level(logging.INFO)
-    task: typing.Final = asyncio.create_task(asyncio.sleep(0.1))
-    await task
-    handler._current_tasks.add(task)
-    await handler._check_tasks_health()
-    assert "Found completed but not discarded tasks" in caplog.text
-
-
-async def test_concurrent_observer_starts(handler: KafkaConcurrentHandler, caplog: pytest.LogCaptureFixture) -> None:
-    caplog.set_level(logging.INFO)
-
-    handler._shutdown_event.set()
-    await handler.observer()
-    assert "Observer task started" in caplog.text
-
-
-async def test_concurrent_observer_zero_interval(handler: KafkaConcurrentHandler) -> None:
-    """Observer with interval=0 should not crash and should call _check_tasks_health."""
-    handler._observer_interval = 0
-
-    with patch.object(handler, "_check_tasks_health", new_callable=AsyncMock) as mock_check:
-
-        async def stop_soon() -> None:
-            await asyncio.sleep(0.05)
-            handler._shutdown_event.set()
-
-        await asyncio.gather(handler.observer(), stop_soon())
-        assert mock_check.called
-
-
-async def test_concurrent_observer_calls_health_check(handler: KafkaConcurrentHandler) -> None:
-    handler._observer_interval = 0.01
-
-    with patch.object(handler, "_check_tasks_health", new_callable=AsyncMock) as mock_check:
-
-        async def stop_soon() -> None:
-            await asyncio.sleep(0.05)
-            handler._shutdown_event.set()
-
-        await asyncio.gather(handler.observer(), stop_soon())
-        assert mock_check.called
-
-
 async def test_concurrent_signal_handler_triggers_stop(handler: KafkaConcurrentHandler) -> None:
     await handler.start()
 
@@ -270,13 +190,6 @@ async def test_concurrent_start_sets_running(handler: KafkaConcurrentHandler) ->
     assert handler.is_healthy
 
 
-async def test_concurrent_start_creates_observer_task(handler: KafkaConcurrentHandler) -> None:
-    await handler.start()
-
-    assert handler._observer_task is not None
-    assert not handler._observer_task.done()
-
-
 async def test_concurrent_start_creates_committer_when_enabled(handler_with_committer: KafkaConcurrentHandler) -> None:
     handler: typing.Final = handler_with_committer
     await handler.start()
@@ -295,20 +208,11 @@ async def test_concurrent_start_skips_when_already_running(
     assert caplog.text.count("Start middleware handler") == 1
 
 
-async def test_concurrent_start_clears_shutdown_event(handler: KafkaConcurrentHandler) -> None:
-    handler._shutdown_event.set()
-    await handler.start()
-    assert not handler._shutdown_event.is_set()
-
-
 async def test_concurrent_stop_base(handler: KafkaConcurrentHandler) -> None:
     await handler.start()
     await handler.stop()
 
     assert not handler.is_running
-    assert handler._shutdown_event.is_set()
-    assert handler._observer_task
-    assert handler._observer_task.cancelled()
 
 
 async def test_concurrent_stop_closes_committer(handler_with_committer: KafkaConcurrentHandler) -> None:
@@ -418,7 +322,9 @@ async def test_concurrent_cancels_all_tasks(handler: KafkaConcurrentHandler) -> 
     assert task2.cancelled()
 
 
-async def test_concurrent_cancels_observer(handler: KafkaConcurrentHandler, caplog: pytest.LogCaptureFixture) -> None:
+async def test_concurrent_cancels_all_tasks_force(
+    handler: KafkaConcurrentHandler, caplog: pytest.LogCaptureFixture
+) -> None:
     caplog.set_level(logging.WARNING)
 
     await handler.start()
@@ -427,8 +333,6 @@ async def test_concurrent_cancels_observer(handler: KafkaConcurrentHandler, capl
     handler._current_tasks.add(task)
     await handler.force_cancel_all()
 
-    assert handler._observer_task
-    assert handler._observer_task.cancelled()
     assert not handler._is_running
     assert "Force cancelling all tasks" in caplog.text
     assert len(handler._current_tasks) == 0
@@ -495,3 +399,8 @@ async def test_concurrent_signal_handling_integration() -> None:
     assert handler._stop_task is not None
     await handler._stop_task
     assert not handler.is_running
+
+
+def test_concurrent_create_rebalance_listener(handler: KafkaConcurrentHandler) -> None:
+    listener: typing.Final = handler.create_rebalance_listener()
+    assert isinstance(listener, ConsumerRebalanceListener)
