@@ -35,9 +35,16 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
         if kafka_message.committed is not None:
             return await call_next(msg)
 
-        if not concurrent_processing or not concurrent_processing.is_running:
+        if not concurrent_processing:
             err = "Concurrent processing is not running. Call `initialize_concurrent_processing` on app startup."
             raise RuntimeError(err)
+
+        if not concurrent_processing.is_running:
+            # Handler is shutting down. Skip processing — offset is not committed, so the
+            # message will be redelivered on restart (at-least-once). Committing sequentially
+            # here would jump ahead of in-flight task offsets and risk silent message loss.
+            logger.warning("Kafka middleware. Handler is shutting down, skipping message")
+            return None
 
         if getattr(kafka_message.consumer, "_enable_auto_commit", False):
             err = (
