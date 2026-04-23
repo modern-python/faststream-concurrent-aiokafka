@@ -165,8 +165,17 @@ async def test_middleware_initialize_skips_when_already_running(
         await stop_concurrent_processing(test_broker.context)
 
 
-async def test_middleware_unhealthy_handler_raises(setup_broker: KafkaBroker) -> None:
-    @setup_broker.subscriber("unhealthy-topic", group_id="unhealthy-group")
+async def test_middleware_shutting_down_skips_message(
+    setup_broker: KafkaBroker, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When the handler is shutting down (is_running=False), messages are skipped with a warning.
+
+    Committing sequentially during shutdown would jump ahead of in-flight task offsets.
+    Skipping ensures the message is redelivered on restart (at-least-once semantics).
+    """
+    caplog.set_level(logging.WARNING)
+
+    @setup_broker.subscriber("shutting-down-topic", group_id="shutting-down-group")
     async def handler(msg: typing.Any) -> None:
         pass  # pragma: no cover
 
@@ -190,8 +199,10 @@ async def test_middleware_unhealthy_handler_raises(setup_broker: KafkaBroker) ->
 
         test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
 
-        with pytest.raises(RuntimeError, match="Call `initialize_concurrent_processing`"):
-            await test_broker.publish({"id": 1}, topic="unhealthy-topic")
+        # Should not raise — returns None and logs a warning
+        result = await test_broker.publish({"id": 1}, topic="shutting-down-topic")
+        assert result is None
+        assert "Handler is shutting down, skipping message" in caplog.text
 
         await asyncio.sleep(0)
         await stop_concurrent_processing(test_broker.context)
