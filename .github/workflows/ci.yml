@@ -50,7 +50,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "**/pyproject.toml"
       - run: uv python install ${{ matrix.python-version }}
-      - run: uv sync --frozen
+      - run: uv sync
       - run: uv run --no-sync pytest . --cov=. --cov-report xml
         env:
           KAFKA_BOOTSTRAP_SERVERS: localhost:9092
