@@ -32,8 +32,9 @@ pip install faststream-concurrent-aiokafka
 
 ## Quick Start
 
-`ack_policy=AckPolicy.MANUAL` is **required** on every subscriber — the middleware enforces this at runtime.
-Without it, aiokafka's auto-commit timer would commit offsets before processing tasks complete, causing silent message loss on crash.
+`ack_policy=AckPolicy.MANUAL` is **required** on every concurrent subscriber — the middleware enforces this at runtime.
+Without it, FastStream would commit offsets before processing tasks complete, causing silent message loss on crash.
+Subscribers that use other ack policies are automatically passed through without concurrent processing.
 
 > **`AsgiFastStream` note**: its lifespan receives an app-level `ContextRepo` separate from `broker.context`. Pass `broker.context` explicitly instead of the injected argument.
 
@@ -41,7 +42,7 @@ Without it, aiokafka's auto-commit timer would commit offsets before processing 
 from contextlib import asynccontextmanager
 from faststream import ContextRepo
 from faststream.asgi import AsgiFastStream
-from faststream.kafka import KafkaBroker, KafkaRouter
+from faststream.kafka import KafkaBroker
 from faststream.middlewares import AckPolicy
 from faststream_concurrent_aiokafka import (
     KafkaConcurrentProcessingMiddleware,
@@ -49,11 +50,9 @@ from faststream_concurrent_aiokafka import (
     stop_concurrent_processing,
 )
 
-# Middleware applied globally to all subscribers
-broker = KafkaBroker(middlewares=[KafkaConcurrentProcessingMiddleware])
-
-# Or scope it to specific subscribers via a router
-router = KafkaRouter(middlewares=[KafkaConcurrentProcessingMiddleware])
+broker = KafkaBroker(...)
+# Register KCM on the broker before any other middleware (see DI note below)
+broker.add_middleware(KafkaConcurrentProcessingMiddleware)
 
 @asynccontextmanager
 async def lifespan(_context: ContextRepo):
@@ -74,11 +73,10 @@ app = AsgiFastStream(broker, lifespan=lifespan)
 async def handle(msg: str) -> None:
     ...
 
-@router.subscriber("other-topic", group_id="other-group", ack_policy=AckPolicy.MANUAL)
+# Subscribers without AckPolicy.MANUAL are passed through unchanged
+@broker.subscriber("other-topic", group_id="other-group")
 async def handle_other(msg: str) -> None:
     ...
-
-broker.include_router(router)
 ```
 
 ## Core Concepts
@@ -124,9 +122,21 @@ Returns `True` if the `KafkaConcurrentHandler` stored in `context` is running an
 
 ### `KafkaConcurrentProcessingMiddleware`
 
-FastStream middleware class. Pass it to `KafkaBroker(middlewares=[...])`, `broker.add_middleware(...)`, or scope it to a subset of subscribers via `KafkaRouter`. See Quick Start for usage examples.
+FastStream middleware class. Register it via `broker.add_middleware(...)`. See Quick Start for usage examples.
 
-> **Must be listed first** in any middleware list. `consume_scope` fires the handler as a background task and returns `None` immediately — any middleware wrapping it on the outside would see that premature return and misfire (wrong timing, missed exceptions, early cleanup). Middlewares listed after it run correctly inside the background task.
+> **Must be outermost.** `consume_scope` fires the handler as a background task and returns `None` immediately. Any middleware that wraps it on the outside will see that premature return and misfire — wrong timing, early cleanup, or missed exceptions. Middlewares added after it (i.e. inner in the chain) run correctly inside the background task.
+
+#### DI framework compatibility (`modern-di-faststream` and similar)
+
+DI frameworks like `modern-di-faststream` register a broker-level middleware that creates a REQUEST-scoped dependency container around each message. If that middleware is **outer** to `KafkaConcurrentProcessingMiddleware`, its scope closes as soon as `consume_scope` returns — before the background task runs — so any dependencies resolved inside the task (database sessions, repositories, …) are created from an already-closed container. Their finalizers never run, leaving connections unreturned to the pool.
+
+**Fix**: call `broker.add_middleware(KafkaConcurrentProcessingMiddleware)` **before** `setup_di(...)` (or any equivalent DI bootstrap call). FastStream stacks middlewares so the last registered is outermost; adding KCM first ensures the DI middleware ends up inside the background task where it can manage the scope lifetime correctly.
+
+```python
+broker = KafkaBroker(...)
+broker.add_middleware(KafkaConcurrentProcessingMiddleware)  # must come first
+modern_di_faststream.setup_di(app, container=container)    # adds DI middleware after → inner to KCM
+```
 
 ## How It Works
 

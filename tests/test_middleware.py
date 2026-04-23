@@ -14,6 +14,7 @@ from faststream_concurrent_aiokafka.middleware import (
     stop_concurrent_processing,
 )
 from faststream_concurrent_aiokafka.processing import KafkaConcurrentHandler
+from tests.mocks import MockKafkaMessage
 
 
 @pytest_asyncio.fixture
@@ -178,6 +179,17 @@ async def test_middleware_unhealthy_handler_raises(setup_broker: KafkaBroker) ->
 
         handler_instance._is_running = False
 
+        # Override the message in context with a MANUAL-ack mock (committed=None,
+        # non-FakeConsumer) so the middleware reaches the is_running check.
+        original_get: typing.Final = test_broker.context.get
+
+        def mock_get(key: str, default: typing.Any = None) -> typing.Any:
+            if key == "message":
+                return MockKafkaMessage()
+            return original_get(key, default)
+
+        test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
+
         with pytest.raises(RuntimeError, match="Call `initialize_concurrent_processing`"):
             await test_broker.publish({"id": 1}, topic="unhealthy-topic")
 
@@ -232,6 +244,7 @@ async def test_middleware_raises_if_auto_commit_enabled(setup_broker: KafkaBroke
             if key == "message":
                 mock_msg = MagicMock()
                 mock_msg.consumer._enable_auto_commit = True
+                mock_msg.committed = None  # must look like MANUAL ack to reach auto-commit check
                 return mock_msg
             return original_get(key, default)
 
@@ -250,8 +263,51 @@ async def test_middleware_no_handler_in_context_raises(setup_broker: KafkaBroker
         pass  # pragma: no cover
 
     async with TestKafkaBroker(setup_broker) as test_broker:
+        # Override message with a MANUAL-ack mock so the middleware reaches the
+        # is_running check (FakeConsumer and non-MANUAL messages pass through first).
+        original_get: typing.Final = test_broker.context.get
+
+        def mock_get(key: str, default: typing.Any = None) -> typing.Any:
+            if key == "message":
+                return MockKafkaMessage()
+            return original_get(key, default)
+
+        test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
+
         with pytest.raises(RuntimeError, match="Call `initialize_concurrent_processing`"):
             await test_broker.publish({"id": 1}, topic="no-handler-topic")
+
+
+async def test_middleware_non_manual_ack_passes_through_without_concurrent_processing(
+    setup_broker: KafkaBroker,
+) -> None:
+    """Non-MANUAL ack subscribers pass through without requiring concurrent processing.
+
+    Allows KafkaConcurrentProcessingMiddleware to be registered at broker level
+    without breaking auto-ack subscribers.
+    """
+    processed: typing.Final = []
+
+    @setup_broker.subscriber("auto-ack-topic", group_id="auto-ack-group")
+    async def handler(msg: typing.Any) -> None:
+        processed.append(msg)
+
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        original_get: typing.Final = test_broker.context.get
+
+        def mock_get(key: str, default: typing.Any = None) -> typing.Any:
+            if key == "message":
+                mock_msg = MagicMock()
+                mock_msg.committed = MagicMock()  # non-None → auto-ack path
+                return mock_msg
+            return original_get(key, default)
+
+        test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
+
+        # No initialize_concurrent_processing call — would raise for MANUAL ack
+        await test_broker.publish({"id": 1}, topic="auto-ack-topic")
+
+    assert len(processed) == 1
 
 
 async def test_middleware_batch_processing_has_committer(setup_broker: KafkaBroker) -> None:
