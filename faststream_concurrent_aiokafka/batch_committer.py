@@ -4,7 +4,7 @@ import dataclasses
 import logging
 import typing
 
-from aiokafka.errors import CommitFailedError, KafkaError
+from aiokafka.errors import CommitFailedError, IllegalStateError, KafkaError
 from faststream.kafka import TopicPartition
 
 
@@ -15,7 +15,7 @@ if typing.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-GRACEFUL_TIMEOUT_SEC: typing.Final = 20
+GRACEFUL_TIMEOUT_SEC: typing.Final = 20.0
 
 
 class CommitterIsDeadError(Exception): ...
@@ -108,9 +108,9 @@ class KafkaBatchCommitter:
         consumer: typing.Final[AIOKafkaConsumer] = tasks_batch[0].consumer
         try:
             await consumer.commit(partitions_to_offsets)
-        except CommitFailedError:
-            # Partition reassignment in progress — safe to ignore, offsets will be re-committed
-            logger.exception("Cannot commit due to rebalancing, ignoring batch")
+        except (CommitFailedError, IllegalStateError):
+            # Partition no longer assigned (rebalance/revocation) — discard batch, not retryable
+            logger.exception("Cannot commit due to partition loss or rebalancing, ignoring batch")
             return False
         except KafkaError:
             # Transient error — re-queue batch for retry on next cycle
