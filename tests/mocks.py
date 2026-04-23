@@ -51,6 +51,7 @@ class MockKafkaMessage:
         self.offset = offset
         self.headers = headers or {}
         self.consumer = MockAIOKafkaConsumer(group_id)
+        self.committed: None = None  # mirrors KafkaAckableMessage (AckPolicy.MANUAL)
 
 
 class MockConsumerRecord:

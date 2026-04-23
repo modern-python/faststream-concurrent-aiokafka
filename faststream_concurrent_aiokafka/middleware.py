@@ -19,13 +19,24 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
         msg: KafkaAckableMessage,
     ) -> typing.Any:  # noqa: ANN401
         concurrent_processing: typing.Final[KafkaConcurrentHandler] = self.context.get(_PROCESSING_CONTEXT_KEY)
-        if not concurrent_processing or not concurrent_processing.is_running:
-            err = "Concurrent processing is not running. Call `initialize_concurrent_processing` on app startup."
-            raise RuntimeError(err)
-
         kafka_message: typing.Final = self.context.get("message")
         if not kafka_message:
             err = "No Kafka message found in context. Ensure the middleware is used with a Kafka subscriber."
+            raise RuntimeError(err)
+
+        if type(kafka_message.consumer).__name__ == "FakeConsumer":
+            return await call_next(msg)
+
+        # KafkaAckableMessage (AckPolicy.MANUAL) starts with committed=None.
+        # KafkaMessage (any auto-ack policy) starts with committed=AckStatus.ACKED.
+        # Non-MANUAL subscribers have offsets managed by FastStream's own
+        # AcknowledgementMiddleware; firing them as background tasks would cause
+        # FastStream to ack before the task completes, risking message loss on crash.
+        if kafka_message.committed is not None:
+            return await call_next(msg)
+
+        if not concurrent_processing or not concurrent_processing.is_running:
+            err = "Concurrent processing is not running. Call `initialize_concurrent_processing` on app startup."
             raise RuntimeError(err)
 
         if getattr(kafka_message.consumer, "_enable_auto_commit", False):
@@ -36,9 +47,6 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
                 "Add ack_policy=AckPolicy.MANUAL to your @broker.subscriber(...) decorator."
             )
             raise RuntimeError(err)
-
-        if type(kafka_message.consumer).__name__ == "FakeConsumer":
-            return await call_next(msg)
 
         await concurrent_processing.handle_task(call_next(msg), self.msg, kafka_message)
         return None
