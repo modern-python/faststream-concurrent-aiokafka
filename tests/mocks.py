@@ -1,7 +1,5 @@
 """Shared mock classes used across multiple test modules."""
 
-import asyncio
-import typing
 from unittest.mock import AsyncMock, Mock
 
 
@@ -27,14 +25,11 @@ class MockAsyncioTask:
     def cancelled(self) -> bool:
         return self._cancelled
 
-    def __await__(self) -> typing.Generator[typing.Any, None, str | None]:
-        if self._cancelled:
-            raise asyncio.CancelledError
-        if self._exception:
-            raise self._exception
-        if False:  # pragma: no cover
-            yield  # makes this a generator so it behaves as a proper awaitable
-        return self._result
+    def done(self) -> bool:
+        return self._done or self._cancelled
+
+    def exception(self) -> Exception | None:
+        return self._exception
 
 
 class MockKafkaMessage:

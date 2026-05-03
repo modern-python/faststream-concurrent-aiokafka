@@ -729,6 +729,164 @@ async def test_committer_commit_tasks_batch_returns_false_on_commit_failure(
     assert result is False
 
 
+async def test_committer_pipelines_fast_partition_ahead_of_slow_partition(
+    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
+) -> None:
+    """A slow task on one partition must not block commits for already-done tasks on another."""
+    fast_done_task: typing.Final = MockAsyncioTask(result="fast", done=True)
+    slow_event: typing.Final = asyncio.Event()
+
+    async def slow_handler() -> str:
+        await slow_event.wait()
+        return "slow"
+
+    slow_task: typing.Final = asyncio.create_task(slow_handler())
+
+    fast_partition: typing.Final = TopicPartition(topic="t", partition=0)
+    slow_partition: typing.Final = TopicPartition(topic="t", partition=1)
+
+    fast_commit_task: typing.Final = KafkaCommitTask(
+        asyncio_task=fast_done_task,  # ty: ignore[invalid-argument-type]
+        offset=10,
+        consumer=mock_consumer,
+        topic_partition=fast_partition,
+    )
+    slow_commit_task: typing.Final = KafkaCommitTask(
+        asyncio_task=slow_task,
+        offset=20,
+        consumer=mock_consumer,
+        topic_partition=slow_partition,
+    )
+
+    for t in (fast_commit_task, slow_commit_task):
+        await committer._messages_queue.put(t)
+    batch: typing.Final = [await committer._messages_queue.get() for _ in range(2)]
+
+    commit_calls: list[dict[TopicPartition, int]] = []
+
+    async def record_commit(_: list[KafkaCommitTask], offsets: dict[TopicPartition, int]) -> bool:
+        commit_calls.append(dict(offsets))
+        return True
+
+    with patch.object(committer, "_call_committer", side_effect=record_commit):
+        commit_coro: typing.Final = asyncio.create_task(committer._commit_tasks_batch(batch))
+        # Give the committer a chance to commit the fast partition before the slow task finishes.
+        await asyncio.sleep(0.05)
+        # First commit should already cover the fast partition only.
+        assert commit_calls == [{fast_partition: 11}]
+        slow_event.set()
+        await commit_coro
+
+    assert commit_calls == [{fast_partition: 11}, {slow_partition: 21}]
+
+
+async def test_committer_pipelines_within_partition_advances_with_prefix(
+    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
+) -> None:
+    """Within one partition, the contiguous-done prefix commits without waiting for the rest."""
+    middle_event: typing.Final = asyncio.Event()
+    last_event: typing.Final = asyncio.Event()
+
+    async def gated(event: asyncio.Event) -> None:
+        await event.wait()
+
+    middle_task: typing.Final = asyncio.create_task(gated(middle_event))
+    last_task: typing.Final = asyncio.create_task(gated(last_event))
+
+    tp: typing.Final = TopicPartition(topic="t", partition=0)
+    first: typing.Final = KafkaCommitTask(
+        asyncio_task=MockAsyncioTask(result="ok", done=True),  # ty: ignore[invalid-argument-type]
+        offset=10,
+        consumer=mock_consumer,
+        topic_partition=tp,
+    )
+    middle: typing.Final = KafkaCommitTask(
+        asyncio_task=middle_task,
+        offset=11,
+        consumer=mock_consumer,
+        topic_partition=tp,
+    )
+    last: typing.Final = KafkaCommitTask(
+        asyncio_task=last_task,
+        offset=12,
+        consumer=mock_consumer,
+        topic_partition=tp,
+    )
+
+    for t in (first, middle, last):
+        await committer._messages_queue.put(t)
+    batch: typing.Final = [await committer._messages_queue.get() for _ in range(3)]
+
+    commit_calls: list[dict[TopicPartition, int]] = []
+
+    async def record_commit(_: list[KafkaCommitTask], offsets: dict[TopicPartition, int]) -> bool:
+        commit_calls.append(dict(offsets))
+        return True
+
+    with patch.object(committer, "_call_committer", side_effect=record_commit):
+        commit_coro: typing.Final = asyncio.create_task(committer._commit_tasks_batch(batch))
+        await asyncio.sleep(0.05)
+        # Only the first task is done; the other two are blocked behind offset=11.
+        assert commit_calls == [{tp: 11}]
+        # Release offset=11 — now offset=11 plus offset=12 (still blocked) advance to 12;
+        # offset=12 still pending, so commit covers up to 11+1=12 only.
+        middle_event.set()
+        await asyncio.sleep(0.05)
+        assert commit_calls == [{tp: 11}, {tp: 12}]
+        # Finally release offset=12.
+        last_event.set()
+        await commit_coro
+
+    assert commit_calls == [{tp: 11}, {tp: 12}, {tp: 13}]
+
+
+async def test_committer_pipelines_returns_false_if_any_slice_fails(
+    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
+) -> None:
+    """If any commit slice fails, _commit_tasks_batch returns False even if later slices succeed."""
+    blocking_event: typing.Final = asyncio.Event()
+
+    async def gated() -> None:
+        await blocking_event.wait()
+
+    fast_task: typing.Final = MockAsyncioTask(result="ok", done=True)
+    slow_task: typing.Final = asyncio.create_task(gated())
+
+    tp_fast: typing.Final = TopicPartition(topic="t", partition=0)
+    tp_slow: typing.Final = TopicPartition(topic="t", partition=1)
+
+    batch: typing.Final = [
+        KafkaCommitTask(
+            asyncio_task=fast_task,  # ty: ignore[invalid-argument-type]
+            offset=1,
+            consumer=mock_consumer,
+            topic_partition=tp_fast,
+        ),
+        KafkaCommitTask(
+            asyncio_task=slow_task,
+            offset=2,
+            consumer=mock_consumer,
+            topic_partition=tp_slow,
+        ),
+    ]
+    for t in batch:
+        await committer._messages_queue.put(t)
+    drained: typing.Final = [await committer._messages_queue.get() for _ in range(2)]
+
+    call_results: typing.Final = iter([False, True])
+
+    async def fail_then_ok(_: list[KafkaCommitTask], __: dict[TopicPartition, int]) -> bool:
+        return next(call_results)
+
+    with patch.object(committer, "_call_committer", side_effect=fail_then_ok):
+        commit_coro: typing.Final = asyncio.create_task(committer._commit_tasks_batch(drained))
+        await asyncio.sleep(0.05)
+        blocking_event.set()
+        result: typing.Final = await commit_coro
+
+    assert result is False
+
+
 async def test_committer_commit_all_does_not_stop_loop(committer: KafkaBatchCommitter) -> None:
     """commit_all() must flush without shutting down the committer (for rebalance use)."""
     committer.spawn()

@@ -140,17 +140,53 @@ class KafkaBatchCommitter:
                 partitions_to_offsets[partition] = max_offset + 1
         return partitions_to_offsets
 
-    async def _commit_tasks_batch(self, tasks_batch: list[KafkaCommitTask]) -> bool:
-        results: typing.Final = await asyncio.gather(
-            *[task.asyncio_task for task in tasks_batch], return_exceptions=True
-        )
-        for result in results:
-            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
-                logger.error("Task has finished with an exception", exc_info=result)
+    @staticmethod
+    def _partition_ready(
+        pending: list[KafkaCommitTask],
+    ) -> tuple[list[KafkaCommitTask], list[KafkaCommitTask]]:
+        # Per partition (sorted by offset), find the first task that is either cancelled or
+        # not-done. Tasks before that boundary are ready. A cancelled boundary means
+        # graceful-shutdown is in progress: the cancelled task and all later same-partition
+        # tasks are added to ready too — _map_offsets_per_partition stops at the cancelled
+        # offset (so nothing past it commits) and task_done() is called on all of them.
+        # A not-done boundary keeps that task and everything after it on its partition blocked.
+        by_partition: dict[TopicPartition, list[KafkaCommitTask]] = {}
+        for task in pending:
+            by_partition.setdefault(task.topic_partition, []).append(task)
+
+        ready: list[KafkaCommitTask] = []
+        still_blocked: list[KafkaCommitTask] = []
+        for tasks in by_partition.values():
+            tasks.sort(key=lambda t: t.offset)
+            cancelled_at: int | None = None
+            blocked_at: int | None = None
+            for index, task in enumerate(tasks):
+                if task.asyncio_task.cancelled():
+                    cancelled_at = index
+                    break
+                if not task.asyncio_task.done():
+                    blocked_at = index
+                    break
+            if cancelled_at is not None:
+                ready.extend(tasks)
+            elif blocked_at is not None:
+                ready.extend(tasks[:blocked_at])
+                still_blocked.extend(tasks[blocked_at:])
+            else:
+                ready.extend(tasks)
+        return ready, still_blocked
+
+    async def _commit_ready_slice(self, ready: list[KafkaCommitTask]) -> bool:
+        for task in ready:
+            if task.asyncio_task.cancelled():
+                continue
+            exc = task.asyncio_task.exception()
+            if exc is not None:
+                logger.error("Task has finished with an exception", exc_info=exc)
 
         # Group by consumer instance — each AIOKafkaConsumer can only commit its own partitions
         consumers_tasks: dict[int, list[KafkaCommitTask]] = {}
-        for task in tasks_batch:
+        for task in ready:
             consumers_tasks.setdefault(id(task.consumer), []).append(task)
 
         all_succeeded = True
@@ -159,8 +195,26 @@ class KafkaBatchCommitter:
             if not await self._call_committer(consumer_tasks, partitions_to_offsets):
                 all_succeeded = False
 
-        for _ in tasks_batch:
+        for _ in ready:
             self._messages_queue.task_done()
+        return all_succeeded
+
+    async def _commit_tasks_batch(self, tasks_batch: list[KafkaCommitTask]) -> bool:
+        pending: list[KafkaCommitTask] = list(tasks_batch)
+        all_succeeded = True
+
+        while pending:
+            ready, still_blocked = self._partition_ready(pending)
+            if ready:
+                if not await self._commit_ready_slice(ready):
+                    all_succeeded = False
+                pending = still_blocked
+                continue
+
+            # _partition_ready places every done/cancelled task in ready, so an empty
+            # ready implies every pending task is still in-flight.
+            await asyncio.wait([t.asyncio_task for t in pending], return_when=asyncio.FIRST_COMPLETED)
+
         return all_succeeded
 
     async def _run_commit_process(self) -> None:
