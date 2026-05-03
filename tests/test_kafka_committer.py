@@ -930,9 +930,15 @@ async def test_committer_absorbs_queue_during_slow_handler() -> None:
             )
         )
 
-    await _drive_until(lambda: consumer.commit.called, deadline_sec=1.0)
-    # The fast partition committed without waiting on the slow one.
-    consumer.commit.assert_called_with({fast_partition: 12})
+    # The fast partition committed without waiting on the slow one. Wait for the fast
+    # partition to actually reach offset 12 — depending on scheduling, the loop may
+    # issue a partial commit at 11 first, which is still correct (across-batch pipelining
+    # streams whatever's done) but the test asserts the final outcome.
+    await _drive_until(
+        lambda: any(c.args[0] == {fast_partition: 12} for c in consumer.commit.call_args_list),
+        deadline_sec=1.0,
+    )
+    consumer.commit.assert_any_call({fast_partition: 12})
 
     slow_event.set()
     await committer.close()
