@@ -57,6 +57,7 @@ class MockKafkaBatchCommitter:
         self.close = AsyncMock()
         self.spawn = Mock()
         self.commit_all = AsyncMock()
+        self.clear_cancellation_watermarks = Mock()
         self.notify_task_completed = Mock()
         self._healthy = True
 
