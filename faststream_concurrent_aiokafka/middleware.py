@@ -1,5 +1,8 @@
+import contextlib
+import dataclasses
 import logging
 import typing
+import weakref
 
 from faststream import BaseMiddleware, ContextRepo
 from faststream.kafka.message import KafkaAckableMessage
@@ -20,6 +23,33 @@ _PROCESSING_CONTEXT_KEY: typing.Final = "concurrent_processing"
 logger = logging.getLogger(__name__)
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class _ConsumerAttrs:
+    is_fake: bool
+    auto_commit: bool
+
+
+# Static, per-consumer flags that drive the per-message branch in consume_scope. Reading
+# them on every message via type().__name__ and getattr was visible in profiles. WeakKey
+# keeps the cache empty when consumers are GC'd; tests that build many MagicMock consumers
+# don't leak.
+_consumer_attrs_cache: typing.Final[weakref.WeakKeyDictionary[typing.Any, _ConsumerAttrs]] = weakref.WeakKeyDictionary()
+
+
+def _consumer_attrs(consumer: typing.Any) -> _ConsumerAttrs:  # noqa: ANN401
+    cached: typing.Final = _consumer_attrs_cache.get(consumer)
+    if cached is not None:
+        return cached
+    attrs: typing.Final = _ConsumerAttrs(
+        is_fake=type(consumer).__name__ == "FakeConsumer",
+        auto_commit=bool(getattr(consumer, "_enable_auto_commit", False)),
+    )
+    # Consumer may not be weakreferable (rare, e.g. exotic mock subclasses); fall through.
+    with contextlib.suppress(TypeError):
+        _consumer_attrs_cache[consumer] = attrs
+    return attrs
+
+
 class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
     async def consume_scope(  # ty: ignore[invalid-method-override]
         self,
@@ -32,7 +62,8 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
             err = "No Kafka message found in context. Ensure the middleware is used with a Kafka subscriber."
             raise RuntimeError(err)
 
-        if type(kafka_message.consumer).__name__ == "FakeConsumer":
+        attrs: typing.Final = _consumer_attrs(kafka_message.consumer)
+        if attrs.is_fake:
             return await call_next(msg)
 
         # KafkaAckableMessage (AckPolicy.MANUAL) starts with committed=None.
@@ -54,7 +85,7 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
             logger.warning("Kafka middleware. Handler is shutting down, skipping message")
             return None
 
-        if getattr(kafka_message.consumer, "_enable_auto_commit", False):
+        if attrs.auto_commit:
             err = (
                 "KafkaConcurrentProcessingMiddleware requires ack_policy=AckPolicy.MANUAL on all subscribers. "
                 "Auto-commit is enabled on this consumer, which commits offsets before processing tasks "

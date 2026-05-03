@@ -10,7 +10,12 @@ import pytest_asyncio
 from aiokafka.errors import CommitFailedError, KafkaError
 from faststream.kafka import TopicPartition
 
-from faststream_concurrent_aiokafka.batch_committer import CommitterIsDeadError, KafkaBatchCommitter, KafkaCommitTask
+from faststream_concurrent_aiokafka.batch_committer import (
+    CommitterIsDeadError,
+    KafkaBatchCommitter,
+    KafkaCommitTask,
+    _insert_sorted,
+)
 from tests.mocks import MockAIOKafkaConsumer, MockAsyncioTask
 
 
@@ -443,71 +448,47 @@ def test_extract_ready_prefixes_cancelled_drops_partition(mock_consumer: MockAIO
     assert pending == {}  # partition emptied
 
 
-def test_pending_head_tasks_skips_cancelled_head(mock_consumer: MockAIOKafkaConsumer) -> None:
-    """A cancelled head must not be added to the wait set (would busy-loop)."""
-    cancelled: typing.Final = MockAsyncioTask(cancelled=True)
+def test_insert_sorted_appends_in_order(mock_consumer: MockAIOKafkaConsumer) -> None:
+    """In-order arrivals (the common case) just append — no bisect cost."""
     tp: typing.Final = TopicPartition(topic="t", partition=0)
-    ct: typing.Final = KafkaCommitTask(
-        asyncio_task=cancelled,  # ty: ignore[invalid-argument-type]
-        offset=10,
-        consumer=mock_consumer,
-        topic_partition=tp,
-    )
-    heads: typing.Final = KafkaBatchCommitter._pending_head_tasks({tp: [ct]})
-    assert heads == []
-
-
-def test_pending_head_tasks_returns_first_not_done(mock_consumer: MockAIOKafkaConsumer) -> None:
-    not_done_head: typing.Final = MockAsyncioTask(done=False)
-    tp: typing.Final = TopicPartition(topic="t", partition=0)
-    pending: typing.Final = {
-        tp: [
+    pending: list[KafkaCommitTask] = []
+    for offset in (10, 11, 12):
+        _insert_sorted(
+            pending,
             KafkaCommitTask(
                 asyncio_task=MockAsyncioTask(done=True),  # ty: ignore[invalid-argument-type]
-                offset=10,
+                offset=offset,
                 consumer=mock_consumer,
                 topic_partition=tp,
             ),
-            KafkaCommitTask(
-                asyncio_task=not_done_head,  # ty: ignore[invalid-argument-type]
-                offset=11,
-                consumer=mock_consumer,
-                topic_partition=tp,
-            ),
-        ],
-    }
-    heads: typing.Final = KafkaBatchCommitter._pending_head_tasks(pending)
-    assert heads == [not_done_head]
+        )
+    assert [t.offset for t in pending] == [10, 11, 12]
 
 
-def test_extract_ready_prefixes_sorts_by_offset(mock_consumer: MockAIOKafkaConsumer) -> None:
-    """Tasks appended out of offset order are sorted before extraction.
-
-    Re-queued-after-transient-KafkaError tasks land at the queue tail and may arrive
-    after newer same-partition tasks; the lazy sort tolerates that.
-    """
+def test_insert_sorted_bisects_out_of_order(mock_consumer: MockAIOKafkaConsumer) -> None:
+    """A re-queued task with a lower offset slides into the right position."""
     tp: typing.Final = TopicPartition(topic="t", partition=0)
-    out_of_order_task: typing.Final = KafkaCommitTask(
-        asyncio_task=MockAsyncioTask(done=True),  # ty: ignore[invalid-argument-type]
-        offset=5,  # earlier offset, but appended after later ones
-        consumer=mock_consumer,
-        topic_partition=tp,
-    )
-    later_tasks: typing.Final = [
+    pending: list[KafkaCommitTask] = []
+    for offset in (10, 11):
+        _insert_sorted(
+            pending,
+            KafkaCommitTask(
+                asyncio_task=MockAsyncioTask(done=True),  # ty: ignore[invalid-argument-type]
+                offset=offset,
+                consumer=mock_consumer,
+                topic_partition=tp,
+            ),
+        )
+    _insert_sorted(
+        pending,
         KafkaCommitTask(
             asyncio_task=MockAsyncioTask(done=True),  # ty: ignore[invalid-argument-type]
-            offset=offset,
+            offset=5,
             consumer=mock_consumer,
             topic_partition=tp,
-        )
-        for offset in (10, 11)
-    ]
-    pending: dict[TopicPartition, list[KafkaCommitTask]] = {tp: [*later_tasks, out_of_order_task]}
-
-    ready: typing.Final = KafkaBatchCommitter._extract_ready_prefixes(pending)
-
-    assert ready[tp][0] == out_of_order_task  # sorted prefix starts at offset 5
-    assert [t.offset for t in ready[tp]] == [5, 10, 11]
+        ),
+    )
+    assert [t.offset for t in pending] == [5, 10, 11]
 
 
 # ---------- _commit_partitions ----------
@@ -539,32 +520,14 @@ async def test_commit_partitions_calls_commit_per_partition_max(
     mock_consumer.commit.assert_called_once_with({tp: expected_offset + 2})
 
 
-async def test_commit_partitions_logs_task_exceptions(
-    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level(logging.ERROR)
-    failing: typing.Final = MockAsyncioTask(exception=ValueError("handler failed"), done=True)
-
-    commit_task: typing.Final = KafkaCommitTask(
-        asyncio_task=failing,  # ty: ignore[invalid-argument-type]
-        offset=100,
-        consumer=mock_consumer,
-        topic_partition=TopicPartition(topic="t", partition=0),
-    )
-    await committer._messages_queue.put(commit_task)
-    await committer._messages_queue.get()
-
-    await committer._commit_partitions({commit_task.topic_partition: [commit_task]})
-
-    assert "Task has finished with an exception" in caplog.text
-
-
 async def test_commit_partitions_partial_failure_still_commits_offset(
-    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer, caplog: pytest.LogCaptureFixture
+    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
 ) -> None:
-    """One task raising still commits the partition's max offset, with the error logged."""
-    caplog.set_level(logging.ERROR)
+    """One task raising still commits the partition's max offset.
 
+    Per-task exception logging is owned by the handler's _finish_task callback,
+    not the committer.
+    """
     failing: typing.Final = MockAsyncioTask(exception=ValueError("handler failed"), done=True)
     succeeding: typing.Final = MockAsyncioTask(result="ok", done=True)
     tp: typing.Final = TopicPartition(topic="t1", partition=0)
@@ -590,7 +553,6 @@ async def test_commit_partitions_partial_failure_still_commits_offset(
     await committer._commit_partitions({tp: tasks})
 
     mock_consumer.commit.assert_called_once_with({tp: 102})
-    assert "Task has finished with an exception" in caplog.text
 
 
 async def test_commit_partitions_handles_multiple_consumers(committer: KafkaBatchCommitter) -> None:
