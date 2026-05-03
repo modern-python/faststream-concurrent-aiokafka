@@ -300,7 +300,7 @@ def test_committer_map_offsets_skips_cancelled_tasks(mock_consumer: MockAIOKafka
         ),
     ]
 
-    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(tasks)
+    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(tasks, {})
     # Only offset 10 is safe to commit; 11 was cancelled, 12 is beyond it.
     assert offsets[tp] == 11  # max safe offset (10) + 1
 
@@ -316,8 +316,110 @@ def test_committer_map_offsets_skips_partition_when_all_cancelled(mock_consumer:
         topic_partition=tp,
     )
 
-    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition([task])
+    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition([task], {})
     assert tp not in offsets
+
+
+# ---------- cancellation watermark ----------
+
+
+def test_map_offsets_records_cancellation_watermark(mock_consumer: MockAIOKafkaConsumer) -> None:
+    """A cancelled task records its offset as the partition's watermark."""
+    tp: typing.Final = TopicPartition(topic="t", partition=0)
+    cancelled_offset: typing.Final = 11
+    task: typing.Final = KafkaCommitTask(
+        asyncio_task=MockAsyncioTask(cancelled=True),  # ty: ignore[invalid-argument-type]
+        offset=cancelled_offset,
+        consumer=mock_consumer,
+        topic_partition=tp,
+    )
+
+    watermarks: dict[TopicPartition, int] = {}
+    KafkaBatchCommitter._map_offsets_per_partition([task], watermarks)
+
+    assert watermarks == {tp: cancelled_offset}
+
+
+def test_map_offsets_blocks_partition_when_watermark_present(mock_consumer: MockAIOKafkaConsumer) -> None:
+    """A successful task whose offset would advance past the watermark is dropped."""
+    tp: typing.Final = TopicPartition(topic="t", partition=0)
+    new_task: typing.Final = KafkaCommitTask(
+        asyncio_task=MockAsyncioTask(done=True),  # ty: ignore[invalid-argument-type]
+        offset=20,
+        consumer=mock_consumer,
+        topic_partition=tp,
+    )
+
+    watermarks: dict[TopicPartition, int] = {tp: 11}
+    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition([new_task], watermarks)
+
+    assert tp not in offsets
+    assert watermarks == {tp: 11}  # unchanged
+
+
+def test_map_offsets_keeps_earliest_watermark(mock_consumer: MockAIOKafkaConsumer) -> None:
+    """When a partition sees a second cancellation at a higher offset, the earlier wins."""
+    tp: typing.Final = TopicPartition(topic="t", partition=0)
+    later_cancelled: typing.Final = KafkaCommitTask(
+        asyncio_task=MockAsyncioTask(cancelled=True),  # ty: ignore[invalid-argument-type]
+        offset=50,
+        consumer=mock_consumer,
+        topic_partition=tp,
+    )
+
+    watermarks: dict[TopicPartition, int] = {tp: 11}
+    KafkaBatchCommitter._map_offsets_per_partition([later_cancelled], watermarks)
+
+    assert watermarks == {tp: 11}
+
+
+def test_map_offsets_commits_max_before_cancellation_records_watermark(
+    mock_consumer: MockAIOKafkaConsumer,
+) -> None:
+    """The pre-cancellation max is still committed in the same batch the watermark is recorded."""
+    tp: typing.Final = TopicPartition(topic="t", partition=0)
+    successful_offset: typing.Final = 9
+    cancelled_offset: typing.Final = 10
+    tasks: typing.Final = [
+        KafkaCommitTask(
+            asyncio_task=MockAsyncioTask(done=True),  # ty: ignore[invalid-argument-type]
+            offset=successful_offset,
+            consumer=mock_consumer,
+            topic_partition=tp,
+        ),
+        KafkaCommitTask(
+            asyncio_task=MockAsyncioTask(cancelled=True),  # ty: ignore[invalid-argument-type]
+            offset=cancelled_offset,
+            consumer=mock_consumer,
+            topic_partition=tp,
+        ),
+    ]
+
+    watermarks: dict[TopicPartition, int] = {}
+    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(tasks, watermarks)
+
+    assert offsets == {tp: successful_offset + 1}
+    assert watermarks == {tp: cancelled_offset}
+
+
+def test_clear_cancellation_watermarks_specific_partitions(committer: KafkaBatchCommitter) -> None:
+    tp_a: typing.Final = TopicPartition(topic="t", partition=0)
+    tp_b: typing.Final = TopicPartition(topic="t", partition=1)
+    committer._cancellation_watermarks[tp_a] = 5
+    committer._cancellation_watermarks[tp_b] = 7
+
+    committer.clear_cancellation_watermarks([tp_a])
+
+    assert committer._cancellation_watermarks == {tp_b: 7}
+
+
+def test_clear_cancellation_watermarks_all_when_none(committer: KafkaBatchCommitter) -> None:
+    committer._cancellation_watermarks[TopicPartition(topic="t", partition=0)] = 5
+    committer._cancellation_watermarks[TopicPartition(topic="t", partition=1)] = 7
+
+    committer.clear_cancellation_watermarks()
+
+    assert committer._cancellation_watermarks == {}
 
 
 def test_committer_map_offsets_advances_to_max_per_partition(mock_consumer: MockAIOKafkaConsumer) -> None:
@@ -348,7 +450,7 @@ def test_committer_map_offsets_advances_to_max_per_partition(mock_consumer: Mock
             )
         )
 
-    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(tasks)
+    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(tasks, {})
     assert offsets[TopicPartition(topic="t1", partition=0)] == first_offset + 10 + 1
     assert offsets[TopicPartition(topic="t1", partition=partition)] == second_offset + 1
 
