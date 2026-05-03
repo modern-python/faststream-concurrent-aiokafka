@@ -194,6 +194,15 @@ class KafkaBatchCommitter:
             logger.error("Committer main task is not running, cannot close committer properly")
             return
 
+        if self._commit_task.done():
+            # Task already terminated (cancelled or raised). Nothing to wait on; surface
+            # any non-cancellation exception so it gets logged, then continue shutdown.
+            if not self._commit_task.cancelled():
+                exc = self._commit_task.exception()
+                if exc is not None:
+                    logger.warning("Committer task had already died before close()", exc_info=exc)
+            return
+
         self._stop_requested = True
         self._flush_batch_event.set()
         try:

@@ -13,9 +13,9 @@ By default FastStream processes Kafka messages sequentially — one message at a
 - Concurrent message processing via asyncio tasks
 - Configurable concurrency limit (semaphore-based)
 - Batch offset committing per partition after each task completes
+- Rebalance-safe: pending offsets are flushed on partition revocation via `ConsumerRebalanceListener`
 - Graceful shutdown: waits up to 10 s for in-flight tasks before exiting
 - Signal handling (SIGTERM / SIGINT / SIGQUIT) triggers graceful shutdown
-- Background observer task to detect and discard stale completed tasks
 - Handler exceptions are logged but do not crash the consumer
 - Health check helper to probe handler status from a `ContextRepo`
 
@@ -89,9 +89,10 @@ A FastStream `BaseMiddleware` subclass. Add it to your broker to enable concurre
 
 The processing engine. Manages:
 - An `asyncio.Semaphore` to enforce `concurrency_limit`
-- A set of in-flight asyncio tasks
-- A background observer that periodically discards stale completed tasks
+- A set of in-flight asyncio tasks (each task's done-callback releases the semaphore and discards the task)
+- A `KafkaBatchCommitter` for offset commits
 - Signal handlers for graceful shutdown
+- An optional `ConsumerRebalanceListener` (via `handler.create_rebalance_listener()`) that flushes pending commits when partitions are revoked
 
 ### KafkaBatchCommitter
 
@@ -146,7 +147,9 @@ modern_di_faststream.setup_di(app, container=container)    # adds DI middleware 
 
 3. **Offset committing**: Each dispatched task is paired with its Kafka offset and consumer reference and enqueued in `KafkaBatchCommitter`. Once the task completes, the committer groups offsets by partition and calls `consumer.commit(partitions_to_offsets)` with `offset + 1` (Kafka's "next offset to fetch" convention).
 
-4. **Graceful shutdown**: `stop_concurrent_processing` sets the shutdown event, flushes the committer, cancels the observer task, and calls `asyncio.gather` with a 10-second timeout to wait for all in-flight tasks.
+4. **Rebalance handling**: When Kafka revokes a partition, the `ConsumerRebalanceListener` (returned by `handler.create_rebalance_listener()`) calls `committer.commit_all()` to flush pending offsets before the partition is reassigned. This prevents in-flight messages from being redelivered to the new owner.
+
+5. **Graceful shutdown**: `stop_concurrent_processing` flushes the committer, then awaits all in-flight tasks via `asyncio.gather` with a 10-second timeout, then removes the signal handlers.
 
 ## Requirements
 
