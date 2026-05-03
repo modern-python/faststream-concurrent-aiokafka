@@ -283,19 +283,27 @@ async def test_concurrent_handles_task_exceptions(
     assert handler._current_tasks.pop().done()
 
 
-async def test_concurrent_logs_timeout(handler: KafkaConcurrentHandler, caplog: pytest.LogCaptureFixture) -> None:
+async def test_concurrent_logs_timeout(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.ERROR)
+    handler: typing.Final = KafkaConcurrentHandler(
+        committer=MockKafkaBatchCommitter(),  # ty: ignore[invalid-argument-type]
+        shutdown_timeout_sec=0.1,
+    )
 
     async def slow_task() -> None:
         await asyncio.sleep(100)
 
-    with patch(
-        "faststream_concurrent_aiokafka.processing.GRACEFUL_TIMEOUT_SEC",
-        1,
-    ):
-        handler._current_tasks.add(asyncio.create_task(slow_task()))
-        await handler.wait_for_subtasks()
-        assert "haven't finished in graceful time" in caplog.text
+    handler._current_tasks.add(asyncio.create_task(slow_task()))
+    await handler.wait_for_subtasks()
+    assert "haven't finished in graceful time" in caplog.text
+
+
+async def test_handler_uses_shutdown_timeout_kwarg() -> None:
+    handler: typing.Final = KafkaConcurrentHandler(
+        committer=MockKafkaBatchCommitter(),  # ty: ignore[invalid-argument-type]
+        shutdown_timeout_sec=7.5,
+    )
+    assert handler._shutdown_timeout_sec == 7.5
 
 
 async def test_concurrent_finish_task_does_not_crash_on_cancelled_task(

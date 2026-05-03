@@ -110,12 +110,13 @@ Create and start the concurrent processing handler; store it in FastStream's con
 | `concurrency_limit` | `10` | Max concurrent asyncio tasks (minimum: 1) |
 | `commit_batch_size` | `10` | Max messages per commit batch |
 | `commit_batch_timeout_sec` | `10.0` | Max seconds before flushing a batch |
+| `shutdown_timeout_sec` | `20.0` | Max seconds to wait for the batch committer to flush AND for in-flight handlers to finish during graceful shutdown |
 
 Returns the `KafkaConcurrentHandler` instance.
 
 ### `stop_concurrent_processing(context)`
 
-Flush pending commits, wait for in-flight tasks (up to 10 s), then stop the handler.
+Flush pending commits, wait for in-flight tasks (up to `shutdown_timeout_sec`), then stop the handler.
 
 ### `is_kafka_handler_healthy(context)`
 

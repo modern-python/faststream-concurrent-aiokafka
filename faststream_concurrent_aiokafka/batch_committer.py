@@ -15,7 +15,7 @@ if typing.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-GRACEFUL_TIMEOUT_SEC: typing.Final = 20.0
+DEFAULT_SHUTDOWN_TIMEOUT_SEC: typing.Final = 20.0
 
 
 class CommitterIsDeadError(Exception): ...
@@ -34,6 +34,7 @@ class KafkaBatchCommitter:
         self,
         commit_batch_timeout_sec: float = 10.0,
         commit_batch_size: int = 10,
+        shutdown_timeout_sec: float = DEFAULT_SHUTDOWN_TIMEOUT_SEC,
     ) -> None:
         self._messages_queue: asyncio.Queue[KafkaCommitTask] = asyncio.Queue()
         self._commit_task: asyncio.Task[typing.Any] | None = None
@@ -42,7 +43,7 @@ class KafkaBatchCommitter:
 
         self._commit_batch_timeout_sec = commit_batch_timeout_sec
         self._commit_batch_size = commit_batch_size
-        self._shutdown_timeout = GRACEFUL_TIMEOUT_SEC
+        self._shutdown_timeout = shutdown_timeout_sec
 
     def _check_is_commit_task_running(self) -> None:
         is_commit_task_running = bool(

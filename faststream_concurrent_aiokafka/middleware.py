@@ -5,7 +5,11 @@ from faststream import BaseMiddleware, ContextRepo
 from faststream.kafka.message import KafkaAckableMessage
 
 from faststream_concurrent_aiokafka.batch_committer import KafkaBatchCommitter
-from faststream_concurrent_aiokafka.processing import DEFAULT_CONCURRENCY_LIMIT, KafkaConcurrentHandler
+from faststream_concurrent_aiokafka.processing import (
+    DEFAULT_CONCURRENCY_LIMIT,
+    DEFAULT_SHUTDOWN_TIMEOUT_SEC,
+    KafkaConcurrentHandler,
+)
 
 
 if typing.TYPE_CHECKING:
@@ -72,6 +76,7 @@ async def initialize_concurrent_processing(
     concurrency_limit: int = DEFAULT_CONCURRENCY_LIMIT,
     commit_batch_size: int = 10,
     commit_batch_timeout_sec: float = 10.0,
+    shutdown_timeout_sec: float = DEFAULT_SHUTDOWN_TIMEOUT_SEC,
 ) -> KafkaConcurrentHandler:
     existing: KafkaConcurrentHandler | None = context.get(_PROCESSING_CONTEXT_KEY)
     if existing and existing.is_running:
@@ -82,8 +87,10 @@ async def initialize_concurrent_processing(
         committer=KafkaBatchCommitter(
             commit_batch_timeout_sec=commit_batch_timeout_sec,
             commit_batch_size=commit_batch_size,
+            shutdown_timeout_sec=shutdown_timeout_sec,
         ),
         concurrency_limit=concurrency_limit,
+        shutdown_timeout_sec=shutdown_timeout_sec,
     )
     await concurrent_processing.start()
     context.set_global(_PROCESSING_CONTEXT_KEY, concurrent_processing)
