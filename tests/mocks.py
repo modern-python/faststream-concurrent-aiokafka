@@ -13,12 +13,10 @@ class MockAsyncioTask:
     def __init__(
         self,
         result: str | None = None,
-        exception: Exception | None = None,
         done: bool = True,
         cancelled: bool = False,
     ) -> None:
         self._result: str | None = result
-        self._exception: Exception | None = exception
         self._done: bool = done
         self._cancelled: bool = cancelled
 
@@ -27,9 +25,6 @@ class MockAsyncioTask:
 
     def done(self) -> bool:
         return self._done or self._cancelled
-
-    def exception(self) -> Exception | None:
-        return self._exception
 
 
 class MockKafkaMessage:

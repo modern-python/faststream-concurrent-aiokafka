@@ -528,7 +528,7 @@ async def test_commit_partitions_partial_failure_still_commits_offset(
     Per-task exception logging is owned by the handler's _finish_task callback,
     not the committer.
     """
-    failing: typing.Final = MockAsyncioTask(exception=ValueError("handler failed"), done=True)
+    failing: typing.Final = MockAsyncioTask(done=True)
     succeeding: typing.Final = MockAsyncioTask(result="ok", done=True)
     tp: typing.Final = TopicPartition(topic="t1", partition=0)
 
