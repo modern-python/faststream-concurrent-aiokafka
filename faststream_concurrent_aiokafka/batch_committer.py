@@ -37,7 +37,9 @@ class _StreamingState:
     queue_get_task: asyncio.Task[KafkaCommitTask]
     flush_wait_task: asyncio.Task[bool]
     task_completed_wait_task: asyncio.Task[bool]
-    timeout_task: asyncio.Task[None] | None = None
+    # Absolute loop-time deadline for the next commit_batch_timeout firing. None when pending
+    # is empty (no timer needed). Passed as `timeout=` to asyncio.wait — no Task allocation.
+    timeout_deadline: float | None = None
     pending: dict[TopicPartition, list[KafkaCommitTask]] = dataclasses.field(default_factory=dict)
     # Cached count of all tasks in `pending` across partitions; kept in sync with
     # _insert_sorted callers and post-extract. Lets _maybe_commit avoid an O(P) sum every loop.
@@ -51,8 +53,6 @@ class _StreamingState:
         for task in (self.queue_get_task, self.flush_wait_task, self.task_completed_wait_task):
             if not task.done():
                 task.cancel()
-        if self.timeout_task is not None and not self.timeout_task.done():
-            self.timeout_task.cancel()
 
 
 def _insert_sorted(partition_pending: list[KafkaCommitTask], new_ct: KafkaCommitTask) -> None:
@@ -193,17 +193,6 @@ class KafkaBatchCommitter:
             self._messages_queue.task_done()
         return all(results)
 
-    def _reset_timeout(
-        self,
-        timeout_task: asyncio.Task[None] | None,
-        pending_non_empty: bool,
-    ) -> asyncio.Task[None] | None:
-        if timeout_task is not None and not timeout_task.done():
-            timeout_task.cancel()
-        if pending_non_empty:
-            return asyncio.create_task(asyncio.sleep(self._commit_batch_timeout_sec))
-        return None
-
     async def _run_commit_process(self) -> None:
         # Streaming committer: one loop continuously absorbs queue items into per-partition
         # pending state and commits each partition's contiguous-done prefix when total pending
@@ -228,10 +217,17 @@ class KafkaBatchCommitter:
         ]
         if not state.should_shutdown:
             wait_targets.append(state.queue_get_task)
-        if state.timeout_task is not None:
-            wait_targets.append(state.timeout_task)
 
-        await asyncio.wait(wait_targets, return_when=asyncio.FIRST_COMPLETED)
+        loop: typing.Final = asyncio.get_running_loop()
+        remaining: float | None = None
+        if state.timeout_deadline is not None:
+            remaining = max(state.timeout_deadline - loop.time(), 0.0)
+
+        await asyncio.wait(wait_targets, return_when=asyncio.FIRST_COMPLETED, timeout=remaining)
+
+        # Capture once after the wait — clock may have advanced past the deadline even if no
+        # future fired (the asyncio.wait timeout is what made us return).
+        now: typing.Final = loop.time()
 
         if not state.should_shutdown and state.queue_get_task.done():
             new_ct = state.queue_get_task.result()
@@ -239,8 +235,8 @@ class KafkaBatchCommitter:
             _insert_sorted(state.pending.setdefault(new_ct.topic_partition, []), new_ct)
             state.pending_count += 1
             state.queue_get_task = asyncio.create_task(self._messages_queue.get())
-            if state.timeout_task is None:
-                state.timeout_task = asyncio.create_task(asyncio.sleep(self._commit_batch_timeout_sec))
+            if state.timeout_deadline is None:
+                state.timeout_deadline = now + self._commit_batch_timeout_sec
 
         # Re-arm completion event before extract, so any task finishing during extract is
         # captured by the next iteration instead of being lost between clear and re-wait.
@@ -248,7 +244,7 @@ class KafkaBatchCommitter:
             self._task_completed_event.clear()
             state.task_completed_wait_task = asyncio.create_task(self._task_completed_event.wait())
 
-        timeout_fired: typing.Final = state.timeout_task is not None and state.timeout_task.done()
+        timeout_fired: typing.Final = state.timeout_deadline is not None and now >= state.timeout_deadline
         flush_fired: typing.Final = state.flush_wait_task.done()
 
         if flush_fired:
@@ -258,11 +254,10 @@ class KafkaBatchCommitter:
         if state.flush_in_progress and not state.pending:
             state.flush_in_progress = False
 
-        # Reset the timer after any commit OR on timeout firing. Let it tick otherwise.
-        # Invariant: pending empty ⇒ timeout_task is None (guaranteed by _reset_timeout
-        # always being called when pending is mutated to empty), so no separate cleanup is needed.
+        # Reset the deadline after any commit OR on timeout firing. Let it tick otherwise.
+        # Invariant: pending empty ⇒ timeout_deadline is None.
         if ready or timeout_fired:
-            state.timeout_task = self._reset_timeout(state.timeout_task, bool(state.pending))
+            state.timeout_deadline = (loop.time() + self._commit_batch_timeout_sec) if state.pending else None
 
     def _handle_flush_fired(self, state: "_StreamingState") -> None:
         if self._stop_requested:
