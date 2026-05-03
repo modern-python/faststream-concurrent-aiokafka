@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 SIGNALS: typing.Final = (signal.SIGTERM, signal.SIGINT, signal.SIGQUIT)
-GRACEFUL_TIMEOUT_SEC: typing.Final[int] = 10
 DEFAULT_CONCURRENCY_LIMIT: typing.Final = 10
+DEFAULT_SHUTDOWN_TIMEOUT_SEC: typing.Final = 20.0
 
 
 class KafkaConcurrentHandler:
@@ -25,6 +25,7 @@ class KafkaConcurrentHandler:
         self,
         committer: KafkaBatchCommitter,
         concurrency_limit: int = DEFAULT_CONCURRENCY_LIMIT,
+        shutdown_timeout_sec: float = DEFAULT_SHUTDOWN_TIMEOUT_SEC,
     ) -> None:
         if concurrency_limit < 1:
             msg = f"concurrency_limit must be >= 1, got {concurrency_limit}"
@@ -35,11 +36,15 @@ class KafkaConcurrentHandler:
         self._is_running: bool = False
         self._committer: KafkaBatchCommitter = committer
         self._stop_task: asyncio.Task[typing.Any] | None = None
+        self._shutdown_timeout_sec: float = shutdown_timeout_sec
 
     async def wait_for_subtasks(self) -> None:
         logger.info("Kafka middleware. Gracefully waiting for tasks to end...")
         try:
-            await asyncio.wait_for(asyncio.gather(*self._current_tasks, return_exceptions=True), GRACEFUL_TIMEOUT_SEC)
+            await asyncio.wait_for(
+                asyncio.gather(*self._current_tasks, return_exceptions=True),
+                self._shutdown_timeout_sec,
+            )
         except TimeoutError:
             logger.exception("Kafka middleware. Whoops, some tasks haven't finished in graceful time, sorry")
 

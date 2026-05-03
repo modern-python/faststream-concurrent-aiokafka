@@ -358,6 +358,19 @@ async def test_middleware_stop_without_start_is_noop(
         assert "Concurrent processing is not running" in caplog.text
 
 
+async def test_middleware_initialize_passes_shutdown_timeout(setup_broker: KafkaBroker) -> None:
+    """initialize_concurrent_processing forwards shutdown_timeout_sec to handler and committer."""
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        handler: typing.Final = await initialize_concurrent_processing(
+            context=test_broker.context, shutdown_timeout_sec=5.0
+        )
+        try:
+            assert handler._shutdown_timeout_sec == 5.0
+            assert handler._committer._shutdown_timeout == 5.0
+        finally:
+            await stop_concurrent_processing(test_broker.context)
+
+
 async def test_middleware_stop_cleans_up_when_committer_dead(setup_broker: KafkaBroker) -> None:
     """If the committer task has died, stop_concurrent_processing must still tear down the handler."""
     async with TestKafkaBroker(setup_broker) as test_broker:
