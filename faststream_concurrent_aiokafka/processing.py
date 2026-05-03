@@ -68,8 +68,7 @@ class KafkaConcurrentHandler:
         record: ConsumerRecord,
         kafka_message: KafkaAckableMessage,
     ) -> None:
-        if self._limiter:
-            await self._limiter.acquire()
+        await self._limiter.acquire()
         task: typing.Final = asyncio.ensure_future(coroutine)
         self._current_tasks.add(task)
         task.add_done_callback(self._finish_task)

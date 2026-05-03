@@ -39,6 +39,9 @@ class _StreamingState:
     task_completed_wait_task: asyncio.Task[bool]
     timeout_task: asyncio.Task[None] | None = None
     pending: dict[TopicPartition, list[KafkaCommitTask]] = dataclasses.field(default_factory=dict)
+    # Cached count of all tasks in `pending` across partitions; kept in sync with
+    # _insert_sorted callers and post-extract. Lets _maybe_commit avoid an O(P) sum every loop.
+    pending_count: int = 0
     should_shutdown: bool = False
     # Active commit_all (flush event seen, _stop_requested is False): keep committing every
     # iteration until pending drains, so messages_queue.join() can return.
@@ -175,20 +178,20 @@ class KafkaBatchCommitter:
         # transient KafkaError re-queues a task, and a per-commit log would emit duplicates.
         flat: typing.Final[list[KafkaCommitTask]] = [t for tasks in ready.values() for t in tasks]
 
-        # Group by consumer instance — each AIOKafkaConsumer can only commit its own partitions
+        # Group by consumer instance — each AIOKafkaConsumer can only commit its own partitions.
+        # With more than one consumer (router with multiple subscribers sharing the handler),
+        # each commit is an independent network round-trip and can run concurrently.
         consumers_tasks: dict[int, list[KafkaCommitTask]] = {}
         for task in flat:
             consumers_tasks.setdefault(id(task.consumer), []).append(task)
 
-        all_succeeded = True
-        for consumer_tasks in consumers_tasks.values():
-            partitions_to_offsets = self._map_offsets_per_partition(consumer_tasks)
-            if not await self._call_committer(consumer_tasks, partitions_to_offsets):
-                all_succeeded = False
+        results: typing.Final = await asyncio.gather(
+            *(self._call_committer(ct, self._map_offsets_per_partition(ct)) for ct in consumers_tasks.values())
+        )
 
         for _ in flat:
             self._messages_queue.task_done()
-        return all_succeeded
+        return all(results)
 
     def _reset_timeout(
         self,
@@ -234,6 +237,7 @@ class KafkaBatchCommitter:
             new_ct = state.queue_get_task.result()
             self._track_user_task(new_ct)
             _insert_sorted(state.pending.setdefault(new_ct.topic_partition, []), new_ct)
+            state.pending_count += 1
             state.queue_get_task = asyncio.create_task(self._messages_queue.get())
             if state.timeout_task is None:
                 state.timeout_task = asyncio.create_task(asyncio.sleep(self._commit_batch_timeout_sec))
@@ -275,6 +279,7 @@ class KafkaBatchCommitter:
                     break
                 self._track_user_task(ct)
                 _insert_sorted(state.pending.setdefault(ct.topic_partition, []), ct)
+                state.pending_count += 1
             if not state.queue_get_task.done():
                 state.queue_get_task.cancel()
         else:
@@ -285,9 +290,8 @@ class KafkaBatchCommitter:
     async def _maybe_commit(
         self, state: "_StreamingState", timeout_fired: bool
     ) -> dict[TopicPartition, list[KafkaCommitTask]]:
-        total_pending: typing.Final = sum(len(p) for p in state.pending.values())
         commit_triggered: typing.Final = (
-            total_pending >= self._commit_batch_size
+            state.pending_count >= self._commit_batch_size
             or timeout_fired
             or state.flush_in_progress
             or state.should_shutdown
@@ -296,6 +300,7 @@ class KafkaBatchCommitter:
             return {}
         ready: typing.Final = self._extract_ready_prefixes(state.pending)
         if ready:
+            state.pending_count -= sum(len(v) for v in ready.values())
             await self._commit_partitions(ready)
         return ready
 
