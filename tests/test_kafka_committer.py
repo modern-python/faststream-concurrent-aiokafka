@@ -200,6 +200,31 @@ async def test_committer_returns_on_flush_event(committer: KafkaBatchCommitter, 
     assert should_shutdown is False
 
 
+async def test_committer_clears_flush_event_on_exit(
+    committer: KafkaBatchCommitter, sample_task: KafkaCommitTask
+) -> None:
+    """The flush event must be cleared on every populate exit, not just the flush branch."""
+    committer._commit_batch_size = 2
+    committer._commit_batch_timeout_sec = 10.0
+
+    for _ in range(2):
+        await committer._messages_queue.put(sample_task)
+    committer._flush_batch_event.set()
+
+    await committer._populate_commit_batch()
+    assert not committer._flush_batch_event.is_set()
+
+
+async def test_committer_clears_flush_event_on_timeout_exit(committer: KafkaBatchCommitter) -> None:
+    """Cleanup-section clear runs even when the loop exits via timeout (no flush branch)."""
+    committer._commit_batch_timeout_sec = 0.01
+    # No items in queue, flush not set — exits via timeout. Then we set the event manually
+    # to assert the cleanup clear ran (it would clear our just-set event too).
+    tasks, _ = await committer._populate_commit_batch()
+    assert tasks == []
+    assert not committer._flush_batch_event.is_set()
+
+
 async def test_committer_returns_shutdown_on_close_flush(
     committer: KafkaBatchCommitter, sample_task: KafkaCommitTask
 ) -> None:

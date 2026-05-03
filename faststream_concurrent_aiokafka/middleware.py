@@ -4,7 +4,7 @@ import typing
 from faststream import BaseMiddleware, ContextRepo
 from faststream.kafka.message import KafkaAckableMessage
 
-from faststream_concurrent_aiokafka.batch_committer import KafkaBatchCommitter
+from faststream_concurrent_aiokafka.batch_committer import CommitterIsDeadError, KafkaBatchCommitter
 from faststream_concurrent_aiokafka.processing import (
     DEFAULT_CONCURRENCY_LIMIT,
     DEFAULT_SHUTDOWN_TIMEOUT_SEC,
@@ -63,11 +63,17 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
             )
             raise RuntimeError(err)
 
-        await concurrent_processing.handle_task(
-            call_next(msg),
-            typing.cast("ConsumerRecord", self.msg),
-            kafka_message,
-        )
+        try:
+            await concurrent_processing.handle_task(
+                call_next(msg),
+                typing.cast("ConsumerRecord", self.msg),
+                kafka_message,
+            )
+        except CommitterIsDeadError:
+            # Race with shutdown: stop() ran between our is_running check and send_task.
+            # The user handler already fired; the offset stays uncommitted, so the message
+            # will be redelivered on restart (at-least-once).
+            logger.warning("Kafka middleware. Handler is shutting down, skipping message")
         return None
 
 

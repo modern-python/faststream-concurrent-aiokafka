@@ -82,7 +82,6 @@ class KafkaBatchCommitter:
                 # flush event — drain remaining queue items; stop only if close() was called
                 if flush_wait_task in done:
                     uncommited_tasks.extend(self._flush_tasks_queue())
-                    self._flush_batch_event.clear()
                     should_shutdown = self._stop_requested
                     break
 
@@ -98,6 +97,10 @@ class KafkaBatchCommitter:
         for task in (queue_get_task, flush_wait_task, timeout_task):
             if task:
                 task.cancel()
+        # Reset on every exit (size, timeout, flush, cancelled). If commit_all() set the
+        # event but the loop exited via size or timeout first, leaving it set would cost
+        # one wasted populate cycle on the next iteration.
+        self._flush_batch_event.clear()
 
         return uncommited_tasks, should_shutdown
 
