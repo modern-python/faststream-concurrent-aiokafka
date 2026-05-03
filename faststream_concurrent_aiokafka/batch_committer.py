@@ -46,10 +46,7 @@ class KafkaBatchCommitter:
         self._shutdown_timeout = shutdown_timeout_sec
 
     def _check_is_commit_task_running(self) -> None:
-        is_commit_task_running = bool(
-            self._commit_task and not self._commit_task.cancelled() and not self._commit_task.done(),
-        )
-        if not is_commit_task_running:
+        if not self._commit_task or self._commit_task.done():
             msg: typing.Final = "Committer main task is not running"
             raise CommitterIsDeadError(msg)
 

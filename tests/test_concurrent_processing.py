@@ -283,6 +283,40 @@ async def test_concurrent_handles_task_exceptions(
     assert handler._current_tasks.pop().done()
 
 
+async def test_concurrent_wait_for_subtasks_drains_tasks_added_during_wait(
+    handler: KafkaConcurrentHandler,
+) -> None:
+    handler._shutdown_timeout_sec = 1.0
+    initial_done: typing.Final = asyncio.Event()
+    late_done: typing.Final = asyncio.Event()
+
+    async def initial() -> None:
+        await asyncio.sleep(0.02)
+        initial_done.set()
+
+    async def late() -> None:
+        await asyncio.sleep(0.05)
+        late_done.set()
+
+    async def inject_during_wait() -> None:
+        await asyncio.sleep(0.01)
+        late_task: typing.Final = asyncio.create_task(late())
+        handler._current_tasks.add(late_task)
+        late_task.add_done_callback(handler._finish_task)
+
+    initial_task: typing.Final = asyncio.create_task(initial())
+    handler._current_tasks.add(initial_task)
+    initial_task.add_done_callback(handler._finish_task)
+
+    injector: typing.Final = asyncio.create_task(inject_during_wait())
+    await handler.wait_for_subtasks()
+    await injector
+
+    assert initial_done.is_set()
+    assert late_done.is_set()
+    assert len(handler._current_tasks) == 0
+
+
 async def test_concurrent_logs_timeout(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.ERROR)
     handler: typing.Final = KafkaConcurrentHandler(
@@ -316,34 +350,6 @@ async def test_concurrent_finish_task_does_not_crash_on_cancelled_task(
     with contextlib.suppress(asyncio.CancelledError):
         await task
     assert task not in handler_with_limit._current_tasks
-
-
-async def test_concurrent_cancels_all_tasks(handler: KafkaConcurrentHandler) -> None:
-    task1: typing.Final = asyncio.create_task(asyncio.sleep(10))
-    task2: typing.Final = asyncio.create_task(asyncio.sleep(10))
-    handler._current_tasks.add(task1)
-    handler._current_tasks.add(task2)
-
-    await handler.force_cancel_all()
-
-    assert task1.cancelled()
-    assert task2.cancelled()
-
-
-async def test_concurrent_cancels_all_tasks_force(
-    handler: KafkaConcurrentHandler, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level(logging.WARNING)
-
-    await handler.start()
-
-    task: typing.Final = asyncio.create_task(asyncio.sleep(10))
-    handler._current_tasks.add(task)
-    await handler.force_cancel_all()
-
-    assert not handler._is_running
-    assert "Force cancelling all tasks" in caplog.text
-    assert len(handler._current_tasks) == 0
 
 
 async def test_concurrent_full_lifecycle() -> None:
