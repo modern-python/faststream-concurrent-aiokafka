@@ -2,7 +2,6 @@ import asyncio
 import functools
 import logging
 import signal
-import time
 import typing
 
 from faststream.kafka import ConsumerRecord, TopicPartition
@@ -33,7 +32,11 @@ class KafkaConcurrentHandler:
             raise ValueError(msg)
 
         self._limiter = asyncio.Semaphore(concurrency_limit)
-        self._current_tasks: set[asyncio.Task[typing.Any]] = set()
+        # Counter + Event replace the old _current_tasks set: shutdown waits on the event,
+        # which is set once every tracked task has fired its done-callback.
+        self._tracked_count: int = 0
+        self._all_done_event: asyncio.Event = asyncio.Event()
+        self._all_done_event.set()  # 0 tasks ⇒ "all done" is True
         self._is_running: bool = False
         self._committer: KafkaBatchCommitter = committer
         self._stop_task: asyncio.Task[typing.Any] | None = None
@@ -41,16 +44,11 @@ class KafkaConcurrentHandler:
 
     async def wait_for_subtasks(self) -> None:
         logger.info("Kafka middleware. Gracefully waiting for tasks to end...")
-        deadline = time.monotonic() + self._shutdown_timeout_sec
         try:
-            pending = [t for t in self._current_tasks if not t.done()]
-            while pending:
-                remaining = max(deadline - time.monotonic(), 0)
-                await asyncio.wait_for(
-                    asyncio.gather(*pending, return_exceptions=True),
-                    timeout=remaining,
-                )
-                pending = [t for t in self._current_tasks if not t.done()]
+            await asyncio.wait_for(
+                self._all_done_event.wait(),
+                timeout=self._shutdown_timeout_sec,
+            )
         except TimeoutError:
             logger.exception("Kafka middleware. Whoops, some tasks haven't finished in graceful time, sorry")
 
@@ -60,7 +58,9 @@ class KafkaConcurrentHandler:
             exc: typing.Final[BaseException | None] = task.exception()
             if exc:
                 logger.error("Kafka middleware. Task has failed with the exception", exc_info=exc)
-        self._current_tasks.discard(task)
+        self._tracked_count -= 1
+        if self._tracked_count == 0:
+            self._all_done_event.set()
 
     async def handle_task(
         self,
@@ -70,7 +70,12 @@ class KafkaConcurrentHandler:
     ) -> None:
         await self._limiter.acquire()
         task: typing.Final = asyncio.ensure_future(coroutine)
-        self._current_tasks.add(task)
+        # Increment + clear before add_done_callback. add_done_callback fires synchronously
+        # if the task is already done; that path then immediately decrements back to a
+        # consistent state. Reverse order would skew the count for a synchronously-finished
+        # task.
+        self._tracked_count += 1
+        self._all_done_event.clear()
         task.add_done_callback(self._finish_task)
         try:
             await self._committer.send_task(
