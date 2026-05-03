@@ -1,5 +1,6 @@
 # ruff: noqa: SLF001, ANN401
 import asyncio
+import contextlib
 import logging
 import typing
 from unittest.mock import MagicMock, patch
@@ -355,6 +356,26 @@ async def test_middleware_stop_without_start_is_noop(
     async with TestKafkaBroker(setup_broker) as test_broker:
         await stop_concurrent_processing(test_broker.context)
         assert "Concurrent processing is not running" in caplog.text
+
+
+async def test_middleware_stop_cleans_up_when_committer_dead(setup_broker: KafkaBroker) -> None:
+    """If the committer task has died, stop_concurrent_processing must still tear down the handler."""
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        handler: typing.Final = await initialize_concurrent_processing(context=test_broker.context)
+
+        committer_task: typing.Final = handler._committer._commit_task
+        assert committer_task is not None
+        committer_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await committer_task
+
+        assert handler.is_running is True
+        assert handler.is_healthy is False  # committer is dead
+
+        await stop_concurrent_processing(test_broker.context)
+
+        assert handler.is_running is False
+        assert test_broker.context.get("concurrent_processing") is None
 
 
 async def test_middleware_handler_exception_logged_not_crashed(

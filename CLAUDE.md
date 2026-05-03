@@ -23,34 +23,36 @@ uv run --no-sync pytest -k test_committer_logs_task_exceptions
 
 ## Architecture
 
-The library provides concurrent Kafka message processing for FastStream. Three modules are exposed:
+The library provides concurrent Kafka message processing for FastStream. Modules:
 
-**`processing.py` — `KafkaConcurrentHandler` (singleton)**
-The core engine. Implements the singleton pattern (one instance per process) using `__new__` + `threading.Lock`. Manages:
-- An `asyncio.Semaphore` for concurrency limiting (`concurrency_limit=0` disables it)
-- A set of in-flight `asyncio.Task`s
-- A background observer task that periodically calls `_check_tasks_health()` to discard stale completed tasks
+**`processing.py` — `KafkaConcurrentHandler`**
+The core engine. One handler is created per `initialize_concurrent_processing` call and stored in FastStream's `ContextRepo` under the key `"concurrent_processing"`. It is *not* a singleton — calling `stop_concurrent_processing` clears the context entry so a fresh handler can be initialised. The handler manages:
+- An `asyncio.Semaphore` for concurrency limiting (minimum: 1)
+- A set of in-flight `asyncio.Task`s, with a done-callback (`_finish_task`) that releases the semaphore and discards the task
 - Signal handlers (SIGTERM/SIGINT/SIGQUIT) that trigger graceful shutdown
-- Optional integration with `KafkaBatchCommitter` when `enable_batch_commit=True`
+- A `KafkaBatchCommitter` for offset commits
 
-Key design: `handle_task()` fires-and-forgets coroutines as asyncio tasks. Message filtering by consumer group is done via the `topic_group` header — messages whose header doesn't match the consumer's `_group_id` are skipped.
+Key design: `handle_task()` fires-and-forgets the user coroutine as an asyncio task and enqueues a `KafkaCommitTask` on the committer. Offsets are not committed until the user task finishes (at-least-once semantics).
 
 **`middleware.py` — FastStream middleware + lifecycle functions**
-- `KafkaConcurrentProcessingMiddleware`: FastStream `BaseMiddleware` subclass. Its `consume_scope` wraps each incoming message in a task submitted to `KafkaConcurrentHandler` (retrieved from FastStream's context).
-- `initialize_concurrent_processing(context, ...)`: call on app startup to create and start the handler, storing it in FastStream's global context.
-- `stop_concurrent_processing(context)`: call on app shutdown; resets the singleton so it can be re-initialized (important for tests).
+- `KafkaConcurrentProcessingMiddleware`: FastStream `BaseMiddleware` subclass. Its `consume_scope` retrieves the handler from `self.context`. It passes through (a) FakeConsumer (TestKafkaBroker) and (b) any subscriber whose ack policy is not MANUAL (`kafka_message.committed is not None`). It refuses if `_enable_auto_commit=True` on the consumer. If the handler has been stopped, it logs a warning and skips the message (the offset stays uncommitted, so the message is redelivered on restart).
+- `initialize_concurrent_processing(context, ...)`: create and start a handler, store it in context.
+- `stop_concurrent_processing(context)`: gates on `is_running`; calls `handler.stop()` and clears the context entry. Safe to call when the committer task has already died — `KafkaBatchCommitter.close()` early-returns on a `done()` task and logs any exception.
 
 **`healthcheck.py` — `is_kafka_handler_healthy`**
-A single function that accepts a `ContextRepo` and returns `True` if the `KafkaConcurrentHandler` is present and healthy. Intended for readiness/liveness probes.
+A single function that accepts a `ContextRepo` and returns `True` if the handler is present and `is_healthy` (i.e. `_is_running` AND committer task alive). Intended for readiness/liveness probes.
 
 **`batch_committer.py` — `KafkaBatchCommitter`**
-Runs as a background asyncio task (spawned via `spawn()`). Collects `KafkaCommitTask` objects from a queue, batches them by topic-partition, waits for each task's asyncio future to complete, then commits the max offset per partition to Kafka. Batching is triggered by timeout or batch size, whichever comes first. `CommitterIsDeadError` is raised to callers if the committer's main task has died.
+Runs as a background asyncio task (`spawn()`). Pulls `KafkaCommitTask`s off a queue, batches by `(timeout OR batch_size)`, awaits each task's asyncio future, groups by `(consumer_id, partition)`, takes the max offset per partition (stopping at the first cancelled task), and commits via `consumer.commit({TopicPartition: offset+1})`. Transient `KafkaError` re-queues the batch; `CommitFailedError`/`IllegalStateError` (rebalance/revocation) discards it. `CommitterIsDeadError` is raised to callers when the committer's main task has died, which triggers `handler.stop()`.
+
+**`rebalance.py` — `ConsumerRebalanceListener`**
+Returned by `handler.create_rebalance_listener()`. On `on_partitions_revoked`, calls `committer.commit_all()` so offsets are flushed before the partition is reassigned, preventing duplicate processing after rebalance.
 
 ## Key patterns
 
-- **Singleton reset in tests**: `KafkaConcurrentHandler._initialized = False` and `._instance = None` must be reset between tests. The shared `autouse` `reset_singleton` fixture lives in `tests/conftest.py` — do not re-define it in individual test files.
-- **Type suppression**: use `# ty: ignore[rule-name]` (not `# type: ignore`) for ty type checker suppressions.
+- **Type suppression**: use `# ty: ignore[rule-name]` (not `# type: ignore`).
 - **No `from __future__ import annotations`**: annotations are evaluated eagerly; `typing.Self`/`typing.Never` are used directly (requires Python ≥ 3.11).
+- **Imports at module level**: no local imports inside functions.
 
 ## Integration tests
 

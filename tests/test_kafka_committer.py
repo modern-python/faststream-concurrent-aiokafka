@@ -510,6 +510,22 @@ async def test_committer_very_large_batch_size(mock_consumer: MockAIOKafkaConsum
     assert len(tasks) == 1
 
 
+async def test_committer_close_logs_when_task_already_died(caplog: pytest.LogCaptureFixture) -> None:
+    """If the committer task crashed before close() is called, the exception is logged."""
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=0.1, commit_batch_size=10)
+
+    async def crashing() -> typing.Never:
+        msg: typing.Final = "boom"
+        raise RuntimeError(msg)
+
+    committer._commit_task = asyncio.create_task(crashing())
+    with contextlib.suppress(RuntimeError):
+        await committer._commit_task
+
+    await committer.close()
+    assert "Committer task had already died before close()" in caplog.text
+
+
 async def test_committer_close_but_timeout_error(caplog: pytest.LogCaptureFixture) -> None:
     committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=0.1, commit_batch_size=10000)
     committer._commit_task = asyncio.create_task(asyncio.sleep(30))

@@ -8,6 +8,10 @@ from faststream_concurrent_aiokafka.batch_committer import KafkaBatchCommitter
 from faststream_concurrent_aiokafka.processing import DEFAULT_CONCURRENCY_LIMIT, KafkaConcurrentHandler
 
 
+if typing.TYPE_CHECKING:
+    from faststream.kafka import ConsumerRecord
+
+
 _PROCESSING_CONTEXT_KEY: typing.Final = "concurrent_processing"
 logger = logging.getLogger(__name__)
 
@@ -55,7 +59,11 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
             )
             raise RuntimeError(err)
 
-        await concurrent_processing.handle_task(call_next(msg), self.msg, kafka_message)
+        await concurrent_processing.handle_task(
+            call_next(msg),
+            typing.cast("ConsumerRecord", self.msg),
+            kafka_message,
+        )
         return None
 
 
@@ -87,7 +95,7 @@ async def stop_concurrent_processing(
     context: ContextRepo,
 ) -> None:
     concurrent_processing: typing.Final[KafkaConcurrentHandler | None] = context.get(_PROCESSING_CONTEXT_KEY)
-    if not concurrent_processing or not concurrent_processing.is_healthy:
+    if concurrent_processing is None or not concurrent_processing.is_running:
         logger.warning("Kafka middleware. Concurrent processing is not running. Cannot stop")
         return
 

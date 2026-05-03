@@ -53,13 +53,13 @@ class KafkaConcurrentHandler:
 
     async def handle_task(
         self,
-        coroutine: typing.Coroutine[typing.Any, typing.Any, typing.Any],
+        coroutine: typing.Awaitable[typing.Any],
         record: ConsumerRecord,
         kafka_message: KafkaAckableMessage,
     ) -> None:
         if self._limiter:
             await self._limiter.acquire()
-        task: typing.Final = asyncio.create_task(coroutine)
+        task: typing.Final = asyncio.ensure_future(coroutine)
         self._current_tasks.add(task)
         task.add_done_callback(self._finish_task)
         try:
