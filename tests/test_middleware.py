@@ -9,6 +9,7 @@ import pytest
 import pytest_asyncio
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 
+from faststream_concurrent_aiokafka.batch_committer import CommitterIsDeadError
 from faststream_concurrent_aiokafka.middleware import (
     KafkaConcurrentProcessingMiddleware,
     initialize_concurrent_processing,
@@ -177,8 +178,7 @@ async def test_middleware_shutting_down_skips_message(
     caplog.set_level(logging.WARNING)
 
     @setup_broker.subscriber("shutting-down-topic", group_id="shutting-down-group")
-    async def handler(msg: typing.Any) -> None:
-        pass  # pragma: no cover
+    async def handler(msg: typing.Any) -> None: ...
 
     async with TestKafkaBroker(setup_broker) as test_broker:
         handler_instance: typing.Final = await initialize_concurrent_processing(
@@ -209,11 +209,57 @@ async def test_middleware_shutting_down_skips_message(
         await stop_concurrent_processing(test_broker.context)
 
 
+async def test_middleware_catches_committer_is_dead_during_race(
+    setup_broker: KafkaBroker, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Shutdown race surfaces as CommitterIsDeadError; the middleware skips with a warning.
+
+    A SIGTERM-driven shutdown that fires between the is_running check and send_task
+    must convert into the same skip-with-warning path used when is_running is False,
+    not propagate as an error.
+    """
+    caplog.set_level(logging.WARNING)
+
+    @setup_broker.subscriber("dead-committer-topic", group_id="dead-committer-group")
+    async def handler(msg: typing.Any) -> None: ...
+
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        handler_instance: typing.Final = await initialize_concurrent_processing(
+            context=test_broker.context,
+            commit_batch_size=10,
+            commit_batch_timeout_sec=5,
+        )
+
+        original_handle_task: typing.Final = handler_instance.handle_task
+
+        async def raising_handle_task(coro: typing.Any, *_args: typing.Any) -> None:
+            coro.close()
+            msg = "dead"
+            raise CommitterIsDeadError(msg)
+
+        handler_instance.handle_task = raising_handle_task  # ty: ignore[invalid-assignment]
+
+        original_get: typing.Final = test_broker.context.get
+
+        def mock_get(key: str, default: typing.Any = None) -> typing.Any:
+            if key == "message":
+                return MockKafkaMessage()
+            return original_get(key, default)
+
+        test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
+
+        result = await test_broker.publish({"id": 1}, topic="dead-committer-topic")
+        assert result is None
+        assert "Handler is shutting down, skipping message" in caplog.text
+
+        handler_instance.handle_task = original_handle_task
+        await stop_concurrent_processing(test_broker.context)
+
+
 async def test_middleware_no_kafka_message_with_batch_processing_raises(setup_broker: KafkaBroker) -> None:
 
     @setup_broker.subscriber("no-kafka-msg-topic", group_id="no-kafka-msg-group")
-    async def handler(msg: typing.Any) -> None:
-        pass  # pragma: no cover
+    async def handler(msg: typing.Any) -> None: ...
 
     async with TestKafkaBroker(setup_broker) as test_broker:
         await initialize_concurrent_processing(
@@ -240,8 +286,7 @@ async def test_middleware_no_kafka_message_with_batch_processing_raises(setup_br
 
 async def test_middleware_raises_if_auto_commit_enabled(setup_broker: KafkaBroker) -> None:
     @setup_broker.subscriber("auto-commit-topic", group_id="auto-commit-group")
-    async def handler(msg: typing.Any) -> None:
-        pass  # pragma: no cover
+    async def handler(msg: typing.Any) -> None: ...
 
     async with TestKafkaBroker(setup_broker) as test_broker:
         await initialize_concurrent_processing(
@@ -271,8 +316,7 @@ async def test_middleware_raises_if_auto_commit_enabled(setup_broker: KafkaBroke
 
 async def test_middleware_no_handler_in_context_raises(setup_broker: KafkaBroker) -> None:
     @setup_broker.subscriber("no-handler-topic", group_id="no-handler-group")
-    async def handler(msg: typing.Any) -> None:
-        pass  # pragma: no cover
+    async def handler(msg: typing.Any) -> None: ...
 
     async with TestKafkaBroker(setup_broker) as test_broker:
         # Override message with a MANUAL-ack mock so the middleware reaches the
@@ -474,8 +518,7 @@ async def test_middleware_general_exception_wrapped(
     caplog.set_level(logging.ERROR)
 
     @setup_broker.subscriber("general-error-topic", group_id="general-error-group")
-    async def handler(msg: typing.Any) -> None:
-        pass  # pragma: no cover
+    async def handler(msg: typing.Any) -> None: ...
 
     async with TestKafkaBroker(setup_broker) as test_broker:
         await initialize_concurrent_processing(
