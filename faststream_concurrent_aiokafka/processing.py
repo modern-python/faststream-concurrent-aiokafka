@@ -2,6 +2,7 @@ import asyncio
 import functools
 import logging
 import signal
+import time
 import typing
 
 from faststream.kafka import ConsumerRecord, TopicPartition
@@ -15,7 +16,7 @@ from faststream_concurrent_aiokafka.rebalance import ConsumerRebalanceListener
 logger = logging.getLogger(__name__)
 
 
-SIGNALS: typing.Final = (signal.SIGTERM, signal.SIGINT, signal.SIGQUIT)
+SIGNALS: typing.Final = (signal.SIGTERM, signal.SIGINT)
 DEFAULT_CONCURRENCY_LIMIT: typing.Final = 10
 DEFAULT_SHUTDOWN_TIMEOUT_SEC: typing.Final = 20.0
 
@@ -40,11 +41,16 @@ class KafkaConcurrentHandler:
 
     async def wait_for_subtasks(self) -> None:
         logger.info("Kafka middleware. Gracefully waiting for tasks to end...")
+        deadline = time.monotonic() + self._shutdown_timeout_sec
         try:
-            await asyncio.wait_for(
-                asyncio.gather(*self._current_tasks, return_exceptions=True),
-                self._shutdown_timeout_sec,
-            )
+            pending = [t for t in self._current_tasks if not t.done()]
+            while pending:
+                remaining = max(deadline - time.monotonic(), 0)
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=remaining,
+                )
+                pending = [t for t in self._current_tasks if not t.done()]
         except TimeoutError:
             logger.exception("Kafka middleware. Whoops, some tasks haven't finished in graceful time, sorry")
 
@@ -121,16 +127,6 @@ class KafkaConcurrentHandler:
         except Exception:  # noqa: BLE001
             logger.warning("Kafka middleware. Exception raised while removing signal handlers", exc_info=True)
         logger.info("Kafka middleware. Complete shutting down middleware handler")
-
-    async def force_cancel_all(self) -> None:
-        logger.warning("Kafka middleware. Force cancelling all tasks!")
-        self._is_running = False
-
-        tasks = list(self._current_tasks)
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        self._current_tasks.clear()
 
     def create_rebalance_listener(self) -> ConsumerRebalanceListener:
         """Return a ConsumerRebalanceListener that flushes pending commits on partition revocation.
