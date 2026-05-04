@@ -84,11 +84,18 @@ class KafkaBatchCommitter:
         self._commit_batch_timeout_sec = commit_batch_timeout_sec
         self._commit_batch_size = commit_batch_size
         self._shutdown_timeout = shutdown_timeout_sec
-        # Per-partition floor for the smallest cancelled offset seen since the partition was
-        # last assigned. Once set, the committer will not advance Kafka's committed offset for
-        # that partition until clear_cancellation_watermarks() is called on rebalance — so the
-        # cancelled-and-after offsets get redelivered on restart (at-least-once).
-        self._cancellation_watermarks: dict[TopicPartition, int] = {}
+        # Per-(consumer, partition) floor for the smallest cancelled offset seen since the
+        # partition was last assigned to that consumer. Scoping by id(consumer) prevents a
+        # cancelled task on one consumer group from blocking commits on another group that
+        # happens to subscribe to the same (topic, partition). Once set, the committer will
+        # not advance Kafka's committed offset for that consumer/partition until
+        # clear_cancellation_watermarks() is called on rebalance — so the cancelled-and-after
+        # offsets get redelivered on restart (at-least-once).
+        self._cancellation_watermarks: dict[tuple[int, TopicPartition], int] = {}
+        # Most-recent consumer (by id()) that absorbed a task for each partition. Lets
+        # clear_cancellation_watermarks(partitions) resolve which consumer's watermark to
+        # drop on rebalance without changing the listener's API.
+        self._partition_owner: dict[TopicPartition, int] = {}
 
     def _on_user_task_done(self, _task: asyncio.Future[typing.Any]) -> None:
         """Done-callback target for user tasks; wakes the streaming loop."""
@@ -129,32 +136,35 @@ class KafkaBatchCommitter:
 
     @staticmethod
     def _map_offsets_per_partition(
+        consumer_id: int,
         consumer_tasks: list[KafkaCommitTask],
-        watermarks: dict[TopicPartition, int],
+        watermarks: dict[tuple[int, TopicPartition], int],
     ) -> dict[TopicPartition, int]:
         # `watermarks` is mutated: any cancelled task seen here records (or lowers) the
-        # partition's watermark. Subsequent batches will see the watermark and skip
-        # advancing past it. Caller (the committer) is the watermark dict's owner.
+        # (consumer, partition) watermark. Subsequent batches for the same consumer will see
+        # it and skip advancing past it. Other consumers (different group, same partition)
+        # have their own keys and are unaffected. Caller (the committer) owns the dict.
         by_partition: dict[TopicPartition, list[KafkaCommitTask]] = {}
         for task in consumer_tasks:
             by_partition.setdefault(task.topic_partition, []).append(task)
 
         partitions_to_offsets: dict[TopicPartition, int] = {}
         for partition, tasks in by_partition.items():
+            wm_key: tuple[int, TopicPartition] = (consumer_id, partition)
             max_offset: int | None = None
             for task in sorted(tasks, key=_OFFSET_KEY):
                 if task.asyncio_task.cancelled():
                     # Earliest cancelled wins: a later batch may not see the earlier
                     # cancellation, so without min() we could forget it and accidentally
                     # advance past the boundary.
-                    existing = watermarks.get(partition)
+                    existing = watermarks.get(wm_key)
                     if existing is None or task.offset < existing:
-                        watermarks[partition] = task.offset
+                        watermarks[wm_key] = task.offset
                     break
                 max_offset = task.offset
             if max_offset is None:
                 continue
-            wm = watermarks.get(partition)
+            wm = watermarks.get(wm_key)
             if wm is not None and (max_offset + 1) > wm:
                 # Advancing would jump past the cancelled boundary — skip this partition
                 # until the watermark is cleared on rebalance.
@@ -212,8 +222,11 @@ class KafkaBatchCommitter:
 
         results: typing.Final = await asyncio.gather(
             *(
-                self._call_committer(ct, self._map_offsets_per_partition(ct, self._cancellation_watermarks))
-                for ct in consumers_tasks.values()
+                self._call_committer(
+                    ct,
+                    self._map_offsets_per_partition(consumer_id, ct, self._cancellation_watermarks),
+                )
+                for consumer_id, ct in consumers_tasks.items()
             )
         )
 
@@ -261,6 +274,7 @@ class KafkaBatchCommitter:
             new_ct = state.queue_get_task.result()
             self._track_user_task(new_ct)
             _insert_sorted(state.pending.setdefault(new_ct.topic_partition, []), new_ct)
+            self._partition_owner[new_ct.topic_partition] = id(new_ct.consumer)
             state.pending_count += 1
             state.queue_get_task = asyncio.create_task(self._messages_queue.get())
             if state.timeout_deadline is None:
@@ -302,6 +316,7 @@ class KafkaBatchCommitter:
                     break
                 self._track_user_task(ct)
                 _insert_sorted(state.pending.setdefault(ct.topic_partition, []), ct)
+                self._partition_owner[ct.topic_partition] = id(ct.consumer)
                 state.pending_count += 1
             if not state.queue_get_task.done():
                 state.queue_get_task.cancel()
@@ -340,13 +355,18 @@ class KafkaBatchCommitter:
         """Forget cancellation watermarks for ``partitions`` (or all if ``None``).
 
         Called on partition revocation by the rebalance listener — the partition's
-        next assignment starts fresh, with no inherited "do not advance" floor.
+        next assignment starts fresh, with no inherited "do not advance" floor. The
+        consumer to clear is resolved via the per-partition owner tracked in the
+        streaming loop, so the listener's API stays partition-only.
         """
         if partitions is None:
             self._cancellation_watermarks.clear()
+            self._partition_owner.clear()
             return
         for partition in partitions:
-            self._cancellation_watermarks.pop(partition, None)
+            owner = self._partition_owner.pop(partition, None)
+            if owner is not None:
+                self._cancellation_watermarks.pop((owner, partition), None)
 
     async def send_task(self, new_task: KafkaCommitTask) -> None:
         self._check_is_commit_task_running()

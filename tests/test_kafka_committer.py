@@ -300,7 +300,7 @@ def test_committer_map_offsets_skips_cancelled_tasks(mock_consumer: MockAIOKafka
         ),
     ]
 
-    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(tasks, {})
+    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(id(mock_consumer), tasks, {})
     # Only offset 10 is safe to commit; 11 was cancelled, 12 is beyond it.
     assert offsets[tp] == 11  # max safe offset (10) + 1
 
@@ -316,7 +316,7 @@ def test_committer_map_offsets_skips_partition_when_all_cancelled(mock_consumer:
         topic_partition=tp,
     )
 
-    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition([task], {})
+    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(id(mock_consumer), [task], {})
     assert tp not in offsets
 
 
@@ -334,10 +334,10 @@ def test_map_offsets_records_cancellation_watermark(mock_consumer: MockAIOKafkaC
         topic_partition=tp,
     )
 
-    watermarks: dict[TopicPartition, int] = {}
-    KafkaBatchCommitter._map_offsets_per_partition([task], watermarks)
+    watermarks: dict[tuple[int, TopicPartition], int] = {}
+    KafkaBatchCommitter._map_offsets_per_partition(id(mock_consumer), [task], watermarks)
 
-    assert watermarks == {tp: cancelled_offset}
+    assert watermarks == {(id(mock_consumer), tp): cancelled_offset}
 
 
 def test_map_offsets_blocks_partition_when_watermark_present(mock_consumer: MockAIOKafkaConsumer) -> None:
@@ -350,11 +350,11 @@ def test_map_offsets_blocks_partition_when_watermark_present(mock_consumer: Mock
         topic_partition=tp,
     )
 
-    watermarks: dict[TopicPartition, int] = {tp: 11}
-    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition([new_task], watermarks)
+    watermarks: dict[tuple[int, TopicPartition], int] = {(id(mock_consumer), tp): 11}
+    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(id(mock_consumer), [new_task], watermarks)
 
     assert tp not in offsets
-    assert watermarks == {tp: 11}  # unchanged
+    assert watermarks == {(id(mock_consumer), tp): 11}  # unchanged
 
 
 def test_map_offsets_keeps_earliest_watermark(mock_consumer: MockAIOKafkaConsumer) -> None:
@@ -367,10 +367,10 @@ def test_map_offsets_keeps_earliest_watermark(mock_consumer: MockAIOKafkaConsume
         topic_partition=tp,
     )
 
-    watermarks: dict[TopicPartition, int] = {tp: 11}
-    KafkaBatchCommitter._map_offsets_per_partition([later_cancelled], watermarks)
+    watermarks: dict[tuple[int, TopicPartition], int] = {(id(mock_consumer), tp): 11}
+    KafkaBatchCommitter._map_offsets_per_partition(id(mock_consumer), [later_cancelled], watermarks)
 
-    assert watermarks == {tp: 11}
+    assert watermarks == {(id(mock_consumer), tp): 11}
 
 
 def test_map_offsets_commits_max_before_cancellation_records_watermark(
@@ -395,31 +395,82 @@ def test_map_offsets_commits_max_before_cancellation_records_watermark(
         ),
     ]
 
-    watermarks: dict[TopicPartition, int] = {}
-    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(tasks, watermarks)
+    watermarks: dict[tuple[int, TopicPartition], int] = {}
+    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(id(mock_consumer), tasks, watermarks)
 
     assert offsets == {tp: successful_offset + 1}
-    assert watermarks == {tp: cancelled_offset}
+    assert watermarks == {(id(mock_consumer), tp): cancelled_offset}
 
 
-def test_clear_cancellation_watermarks_specific_partitions(committer: KafkaBatchCommitter) -> None:
+def test_map_offsets_watermark_isolated_per_consumer() -> None:
+    """A cancelled task on one consumer must not block commits on another consumer.
+
+    Regression: previously the watermark dict was keyed by partition only, so a single
+    handler shared across consumer groups subscribing to the same (topic, partition)
+    would have one group's cancellation block the other group's commit.
+    """
+    consumer_a: typing.Final = MockAIOKafkaConsumer(group_id="group-a")
+    consumer_b: typing.Final = MockAIOKafkaConsumer(group_id="group-b")
+    tp: typing.Final = TopicPartition(topic="shared", partition=0)
+
+    cancelled_on_a: typing.Final = KafkaCommitTask(
+        asyncio_task=MockAsyncioTask(cancelled=True),  # ty: ignore[invalid-argument-type]
+        offset=5,
+        consumer=consumer_a,
+        topic_partition=tp,
+    )
+    success_on_b: typing.Final = KafkaCommitTask(
+        asyncio_task=MockAsyncioTask(done=True),  # ty: ignore[invalid-argument-type]
+        offset=20,
+        consumer=consumer_b,
+        topic_partition=tp,
+    )
+
+    watermarks: dict[tuple[int, TopicPartition], int] = {}
+    KafkaBatchCommitter._map_offsets_per_partition(id(consumer_a), [cancelled_on_a], watermarks)
+    assert watermarks == {(id(consumer_a), tp): 5}
+
+    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(
+        id(consumer_b), [success_on_b], watermarks
+    )
+    assert offsets == {tp: 21}, "Consumer B's commit must not be blocked by consumer A's watermark"
+    # Consumer A's watermark stays intact for consumer A.
+    assert watermarks == {(id(consumer_a), tp): 5}
+
+
+def test_clear_cancellation_watermarks_specific_partitions(
+    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
+) -> None:
     tp_a: typing.Final = TopicPartition(topic="t", partition=0)
     tp_b: typing.Final = TopicPartition(topic="t", partition=1)
-    committer._cancellation_watermarks[tp_a] = 5
-    committer._cancellation_watermarks[tp_b] = 7
+    consumer_id: typing.Final = id(mock_consumer)
+    # Pre-seed owner so clear can resolve which consumer's watermark to drop.
+    committer._partition_owner[tp_a] = consumer_id
+    committer._partition_owner[tp_b] = consumer_id
+    committer._cancellation_watermarks[(consumer_id, tp_a)] = 5
+    committer._cancellation_watermarks[(consumer_id, tp_b)] = 7
 
     committer.clear_cancellation_watermarks([tp_a])
 
-    assert committer._cancellation_watermarks == {tp_b: 7}
+    assert committer._cancellation_watermarks == {(consumer_id, tp_b): 7}
+    assert committer._partition_owner == {tp_b: consumer_id}
 
 
-def test_clear_cancellation_watermarks_all_when_none(committer: KafkaBatchCommitter) -> None:
-    committer._cancellation_watermarks[TopicPartition(topic="t", partition=0)] = 5
-    committer._cancellation_watermarks[TopicPartition(topic="t", partition=1)] = 7
+def test_clear_cancellation_watermarks_all_when_none(
+    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
+) -> None:
+    consumer_id: typing.Final = id(mock_consumer)
+    tp_a: typing.Final = TopicPartition(topic="t", partition=0)
+    tp_b: typing.Final = TopicPartition(topic="t", partition=1)
+    committer._partition_owner[tp_a] = consumer_id
+    committer._partition_owner[tp_b] = consumer_id
+    committer._cancellation_watermarks[(consumer_id, tp_a)] = 5
+    committer._cancellation_watermarks[(consumer_id, tp_b)] = 7
 
     committer.clear_cancellation_watermarks()
 
     assert committer._cancellation_watermarks == {}
+    assert committer._partition_owner == {}
 
 
 def test_committer_map_offsets_advances_to_max_per_partition(mock_consumer: MockAIOKafkaConsumer) -> None:
@@ -450,7 +501,7 @@ def test_committer_map_offsets_advances_to_max_per_partition(mock_consumer: Mock
             )
         )
 
-    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(tasks, {})
+    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(id(mock_consumer), tasks, {})
     assert offsets[TopicPartition(topic="t1", partition=0)] == first_offset + 10 + 1
     assert offsets[TopicPartition(topic="t1", partition=partition)] == second_offset + 1
 
