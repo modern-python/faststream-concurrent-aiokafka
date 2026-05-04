@@ -430,9 +430,7 @@ def test_map_offsets_watermark_isolated_per_consumer() -> None:
     KafkaBatchCommitter._map_offsets_per_partition(id(consumer_a), [cancelled_on_a], watermarks)
     assert watermarks == {(id(consumer_a), tp): 5}
 
-    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(
-        id(consumer_b), [success_on_b], watermarks
-    )
+    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(id(consumer_b), [success_on_b], watermarks)
     assert offsets == {tp: 21}, "Consumer B's commit must not be blocked by consumer A's watermark"
     # Consumer A's watermark stays intact for consumer A.
     assert watermarks == {(id(consumer_a), tp): 5}
