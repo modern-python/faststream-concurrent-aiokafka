@@ -95,8 +95,10 @@ class KafkaBatchCommitter:
         self._task_completed_event.set()
 
     def _track_user_task(self, ct: KafkaCommitTask) -> None:
-        # add_done_callback fires the callback synchronously if the future is already done,
-        # so a task that completed between create_task and absorb still triggers the wakeup.
+        # If the task is already done by the time we absorb it, add_done_callback still
+        # schedules _on_user_task_done via loop.call_soon — it fires on the next tick and
+        # wakes the streaming loop, so a task that completed between create_task and
+        # absorb still triggers the wakeup.
         ct.asyncio_task.add_done_callback(self._on_user_task_done)
 
     def _check_is_commit_task_running(self) -> None:

@@ -28,8 +28,8 @@ The library provides concurrent Kafka message processing for FastStream. Modules
 **`processing.py` — `KafkaConcurrentHandler`**
 The core engine. One handler is created per `initialize_concurrent_processing` call and stored in FastStream's `ContextRepo` under the key `"concurrent_processing"`. It is *not* a singleton — calling `stop_concurrent_processing` clears the context entry so a fresh handler can be initialised. The handler manages:
 - An `asyncio.Semaphore` for concurrency limiting (minimum: 1)
-- A set of in-flight `asyncio.Task`s, with a done-callback (`_finish_task`) that releases the semaphore and discards the task
-- Signal handlers (SIGTERM/SIGINT/SIGQUIT) that trigger graceful shutdown
+- In-flight task tracking via a counter (`_tracked_count`) + `asyncio.Event` (`_all_done_event`); the per-task done-callback (`_finish_task`) releases the semaphore, decrements the counter, and sets the event when it reaches zero. `wait_for_subtasks` awaits the event with a timeout
+- Signal handlers (SIGTERM/SIGINT) that trigger graceful shutdown
 - A `KafkaBatchCommitter` for offset commits
 
 Key design: `handle_task()` fires-and-forgets the user coroutine as an asyncio task and enqueues a `KafkaCommitTask` on the committer. Offsets are not committed until the user task finishes (at-least-once semantics).
