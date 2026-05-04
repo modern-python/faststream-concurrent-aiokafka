@@ -70,10 +70,11 @@ class KafkaConcurrentHandler:
     ) -> None:
         await self._limiter.acquire()
         task: typing.Final = asyncio.ensure_future(coroutine)
-        # Increment + clear before add_done_callback. add_done_callback fires synchronously
-        # if the task is already done; that path then immediately decrements back to a
-        # consistent state. Reverse order would skew the count for a synchronously-finished
-        # task.
+        # Increment + clear before add_done_callback so the counter already reflects this
+        # task by the time _finish_task can run. add_done_callback always schedules via
+        # loop.call_soon (never synchronous), but the callback could fire on the very next
+        # tick — once we yield at the send_task await below — so the bookkeeping must be
+        # consistent before that point.
         self._tracked_count += 1
         self._all_done_event.clear()
         task.add_done_callback(self._finish_task)

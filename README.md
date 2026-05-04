@@ -14,8 +14,8 @@ By default FastStream processes Kafka messages sequentially — one message at a
 - Configurable concurrency limit (semaphore-based)
 - Batch offset committing per partition after each task completes
 - Rebalance-safe: pending offsets are flushed on partition revocation via `ConsumerRebalanceListener`
-- Graceful shutdown: waits up to 10 s for in-flight tasks before exiting
-- Signal handling (SIGTERM / SIGINT / SIGQUIT) triggers graceful shutdown
+- Graceful shutdown: waits up to `shutdown_timeout_sec` (default 20 s) for in-flight tasks before exiting
+- Signal handling (SIGTERM / SIGINT) triggers graceful shutdown
 - Handler exceptions are logged but do not crash the consumer
 - Health check helper to probe handler status from a `ContextRepo`
 
@@ -89,14 +89,14 @@ A FastStream `BaseMiddleware` subclass. Add it to your broker to enable concurre
 
 The processing engine. Manages:
 - An `asyncio.Semaphore` to enforce `concurrency_limit`
-- A set of in-flight asyncio tasks (each task's done-callback releases the semaphore and discards the task)
+- In-flight task tracking via a counter + `asyncio.Event` (each task's done-callback releases the semaphore, decrements the counter, and sets the event when it reaches zero)
 - A `KafkaBatchCommitter` for offset commits
 - Signal handlers for graceful shutdown
 - An optional `ConsumerRebalanceListener` (via `handler.create_rebalance_listener()`) that flushes pending commits when partitions are revoked
 
 ### KafkaBatchCommitter
 
-Runs as a background asyncio task. Receives `KafkaCommitTask` objects, waits for each task's asyncio future to complete, then commits the max offset per partition to Kafka. Batching is triggered by size or timeout. If the committer's task dies, `CommitterIsDeadError` is raised to callers.
+Runs as a background asyncio task. A streaming loop absorbs `KafkaCommitTask` objects into per-partition pending state and commits each partition's contiguous-done prefix when total pending crosses `commit_batch_size`, when `commit_batch_timeout_sec` fires, or when `commit_all`/`close` sets the flush event. Cancelled tasks are treated as a hard boundary — the offset advance stops at the cancelled task so it gets redelivered on restart (at-least-once). If the committer's task dies, `CommitterIsDeadError` is raised to callers.
 
 ## API Reference
 
@@ -132,12 +132,12 @@ FastStream middleware class. Register it via `broker.add_middleware(...)`. See Q
 
 DI frameworks like `modern-di-faststream` register a broker-level middleware that creates a REQUEST-scoped dependency container around each message. If that middleware is **outer** to `KafkaConcurrentProcessingMiddleware`, its scope closes as soon as `consume_scope` returns — before the background task runs — so any dependencies resolved inside the task (database sessions, repositories, …) are created from an already-closed container. Their finalizers never run, leaving connections unreturned to the pool.
 
-**Fix**: call `broker.add_middleware(KafkaConcurrentProcessingMiddleware)` **before** `setup_di(...)` (or any equivalent DI bootstrap call). FastStream stacks middlewares so the last registered is outermost; adding KCM first ensures the DI middleware ends up inside the background task where it can manage the scope lifetime correctly.
+**Fix**: call `broker.add_middleware(KafkaConcurrentProcessingMiddleware)` **before** `setup_di(...)` (or any equivalent DI bootstrap call). FastStream stacks broker middlewares so the **first** registered is outermost; adding KCM first makes it wrap the DI middleware, so the DI middleware runs *inside* KCM's background task and can manage the scope lifetime correctly.
 
 ```python
 broker = KafkaBroker(...)
-broker.add_middleware(KafkaConcurrentProcessingMiddleware)  # must come first
-modern_di_faststream.setup_di(app, container=container)    # adds DI middleware after → inner to KCM
+broker.add_middleware(KafkaConcurrentProcessingMiddleware)  # registered first → outermost
+modern_di_faststream.setup_di(app, container=container)    # registered after → inner to KCM
 ```
 
 ## How It Works
@@ -150,7 +150,7 @@ modern_di_faststream.setup_di(app, container=container)    # adds DI middleware 
 
 4. **Rebalance handling**: When Kafka revokes a partition, the `ConsumerRebalanceListener` (returned by `handler.create_rebalance_listener()`) calls `committer.commit_all()` to flush pending offsets before the partition is reassigned. This prevents in-flight messages from being redelivered to the new owner.
 
-5. **Graceful shutdown**: `stop_concurrent_processing` flushes the committer, then awaits all in-flight tasks via `asyncio.gather` with a 10-second timeout, then removes the signal handlers.
+5. **Graceful shutdown**: `stop_concurrent_processing` flushes the committer, then awaits all in-flight tasks via an `asyncio.Event` (set when the in-flight counter reaches zero) bounded by `shutdown_timeout_sec` (default 20 s), then removes the signal handlers.
 
 ## Requirements
 
