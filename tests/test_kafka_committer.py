@@ -53,18 +53,10 @@ def test_committer_raises_when_not_spawned(committer: KafkaBatchCommitter) -> No
         committer._check_is_commit_task_running()
 
 
-async def test_committer_raises_when_cancelled(committer: KafkaBatchCommitter) -> None:
-    committer._commit_task = asyncio.create_task(asyncio.sleep(100))
-    committer._commit_task.cancel()
-    await asyncio.sleep(0.5)
-    with pytest.raises(CommitterIsDeadError):
-        committer._check_is_commit_task_running()
-
-
 async def test_committer_raises_when_done(committer: KafkaBatchCommitter) -> None:
     committer._commit_task = asyncio.create_task(asyncio.sleep(100))
     committer._commit_task.cancel()
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(0)
 
     with pytest.raises(CommitterIsDeadError):
         committer._check_is_commit_task_running()
@@ -188,7 +180,7 @@ async def test_committer_close_but_timeout_error(caplog: pytest.LogCaptureFixtur
     committer._commit_task = asyncio.create_task(asyncio.sleep(30))
     committer._shutdown_timeout = 0.1
     await committer.close()
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(0)
     assert "Committer main task shutdown timed out, forcing cancellation" in caplog.text
     assert not committer.is_healthy
 

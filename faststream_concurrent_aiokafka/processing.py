@@ -5,7 +5,7 @@ import typing
 from faststream.kafka import ConsumerRecord, TopicPartition
 from faststream.kafka.message import KafkaAckableMessage
 
-from faststream_concurrent_aiokafka import batch_committer
+from faststream_concurrent_aiokafka import batch_committer, consts
 from faststream_concurrent_aiokafka.batch_committer import KafkaBatchCommitter
 from faststream_concurrent_aiokafka.rebalance import ConsumerRebalanceListener
 
@@ -13,15 +13,11 @@ from faststream_concurrent_aiokafka.rebalance import ConsumerRebalanceListener
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_CONCURRENCY_LIMIT: typing.Final = 10
-DEFAULT_SHUTDOWN_TIMEOUT_SEC: typing.Final = 20.0
-
-
 class KafkaConcurrentHandler:
     def __init__(
         self,
         committer: KafkaBatchCommitter,
-        concurrency_limit: int = DEFAULT_CONCURRENCY_LIMIT,
+        concurrency_limit: int = consts.DEFAULT_CONCURRENCY_LIMIT,
     ) -> None:
         if concurrency_limit < 1:
             msg = f"concurrency_limit must be >= 1, got {concurrency_limit}"
@@ -85,9 +81,9 @@ class KafkaConcurrentHandler:
         # Cancel in-flight user tasks. The committer treats cancelled tasks as a hard
         # offset boundary (batch_committer._extract_ready_prefixes / _map_offsets_per_partition):
         # cancelled-and-after offsets stay uncommitted and get redelivered on restart.
+        # Task.cancel() is a no-op on already-done tasks.
         for task in list(self._tracked_tasks):
-            if not task.done():
-                task.cancel()
+            task.cancel()
 
         await self._committer.close()
 

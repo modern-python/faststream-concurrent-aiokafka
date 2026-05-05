@@ -9,6 +9,8 @@ import typing
 from aiokafka.errors import CommitFailedError, IllegalStateError, KafkaError
 from faststream.kafka import TopicPartition
 
+from faststream_concurrent_aiokafka import consts
+
 
 if typing.TYPE_CHECKING:
     from aiokafka import AIOKafkaConsumer
@@ -17,7 +19,6 @@ if typing.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_SHUTDOWN_TIMEOUT_SEC: typing.Final = 20.0
 _OFFSET_KEY: typing.Final = operator.attrgetter("offset")
 
 
@@ -68,9 +69,9 @@ def _insert_sorted(partition_pending: list[KafkaCommitTask], new_ct: KafkaCommit
 class KafkaBatchCommitter:
     def __init__(
         self,
-        commit_batch_timeout_sec: float = 10.0,
-        commit_batch_size: int = 10,
-        shutdown_timeout_sec: float = DEFAULT_SHUTDOWN_TIMEOUT_SEC,
+        commit_batch_timeout_sec: float = consts.DEFAULT_COMMIT_BATCH_TIMEOUT_SEC,
+        commit_batch_size: int = consts.DEFAULT_COMMIT_BATCH_SIZE,
+        shutdown_timeout_sec: float = consts.DEFAULT_SHUTDOWN_TIMEOUT_SEC,
     ) -> None:
         self._messages_queue: asyncio.Queue[KafkaCommitTask] = asyncio.Queue()
         self._commit_task: asyncio.Task[typing.Any] | None = None
@@ -402,8 +403,8 @@ class KafkaBatchCommitter:
             self._commit_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._commit_task
-        except Exception as exc:
-            logger.exception("Committer task failed during shutdown", exc_info=exc)
+        except Exception:
+            logger.exception("Committer task failed during shutdown")
             raise
 
     @property

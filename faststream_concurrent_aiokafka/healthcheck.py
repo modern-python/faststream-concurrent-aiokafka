@@ -2,7 +2,7 @@ import typing
 
 from faststream import ContextRepo
 
-from faststream_concurrent_aiokafka.middleware import _PROCESSING_CONTEXT_KEY
+from faststream_concurrent_aiokafka import consts
 
 
 if typing.TYPE_CHECKING:
@@ -10,5 +10,5 @@ if typing.TYPE_CHECKING:
 
 
 def is_kafka_handler_healthy(context: ContextRepo) -> bool:
-    handler: KafkaConcurrentHandler | None = context.get(_PROCESSING_CONTEXT_KEY)
+    handler: KafkaConcurrentHandler | None = context.get(consts.PROCESSING_CONTEXT_KEY)
     return handler is not None and handler.is_healthy

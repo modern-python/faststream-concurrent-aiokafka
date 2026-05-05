@@ -16,7 +16,7 @@ from faststream_concurrent_aiokafka.middleware import (
     stop_concurrent_processing,
 )
 from faststream_concurrent_aiokafka.processing import KafkaConcurrentHandler
-from tests.mocks import MockKafkaMessage
+from tests.mocks import patched_message
 
 
 @pytest_asyncio.fixture
@@ -185,21 +185,13 @@ async def test_middleware_shutting_down_skips_message(
 
         handler_instance._is_running = False
 
-        # Override the message in context with a MANUAL-ack mock (committed=None,
-        # non-FakeConsumer) so the middleware reaches the is_running check.
-        original_get: typing.Final = test_broker.context.get
-
-        def mock_get(key: str, default: typing.Any = None) -> typing.Any:
-            if key == "message":
-                return MockKafkaMessage()
-            return original_get(key, default)
-
-        test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
-
-        # Should not raise — returns None and logs a warning
-        result = await test_broker.publish({"id": 1}, topic="shutting-down-topic")
-        assert result is None
-        assert "Handler is shutting down, skipping message" in caplog.text
+        # MANUAL-ack mock (committed=None, non-FakeConsumer) so the middleware reaches
+        # the is_running check.
+        with patched_message(test_broker):
+            # Should not raise — returns None and logs a warning
+            result = await test_broker.publish({"id": 1}, topic="shutting-down-topic")
+            assert result is None
+            assert "Handler is shutting down, skipping message" in caplog.text
 
         await asyncio.sleep(0)
         await stop_concurrent_processing(test_broker.context)
@@ -235,18 +227,10 @@ async def test_middleware_catches_committer_is_dead_during_race(
 
         handler_instance.handle_task = raising_handle_task  # ty: ignore[invalid-assignment]
 
-        original_get: typing.Final = test_broker.context.get
-
-        def mock_get(key: str, default: typing.Any = None) -> typing.Any:
-            if key == "message":
-                return MockKafkaMessage()
-            return original_get(key, default)
-
-        test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
-
-        result = await test_broker.publish({"id": 1}, topic="dead-committer-topic")
-        assert result is None
-        assert "Handler is shutting down, skipping message" in caplog.text
+        with patched_message(test_broker):
+            result = await test_broker.publish({"id": 1}, topic="dead-committer-topic")
+            assert result is None
+            assert "Handler is shutting down, skipping message" in caplog.text
 
         handler_instance.handle_task = original_handle_task
         await stop_concurrent_processing(test_broker.context)
@@ -278,16 +262,7 @@ async def test_middleware_logs_and_propagates_cancelled_error(
 
         handler_instance.handle_task = raising_handle_task  # ty: ignore[invalid-assignment]
 
-        original_get: typing.Final = test_broker.context.get
-
-        def mock_get(key: str, default: typing.Any = None) -> typing.Any:
-            if key == "message":
-                return MockKafkaMessage()
-            return original_get(key, default)
-
-        test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
-
-        with pytest.raises(asyncio.CancelledError):
+        with patched_message(test_broker), pytest.raises(asyncio.CancelledError):
             await test_broker.publish({"id": 1}, topic="cancel-topic")
         assert "Task cancelled during shutdown" in caplog.text
 
@@ -307,16 +282,10 @@ async def test_middleware_no_kafka_message_with_batch_processing_raises(setup_br
             commit_batch_timeout_sec=5,
         )
 
-        original_get: typing.Final = test_broker.context.get
-
-        def mock_get(key: str, default: typing.Any = None) -> typing.Any:
-            if key == "message":
-                return None
-            return original_get(key, default)
-
-        test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
-
-        with pytest.raises(RuntimeError, match="No Kafka message found in context"):
+        with (
+            patched_message(test_broker, message=None),
+            pytest.raises(RuntimeError, match="No Kafka message found in context"),
+        ):
             await test_broker.publish({"id": 1}, topic="no-kafka-msg-topic")
 
         await asyncio.sleep(0)
@@ -334,19 +303,11 @@ async def test_middleware_raises_if_auto_commit_enabled(setup_broker: KafkaBroke
             commit_batch_timeout_sec=5,
         )
 
-        original_get: typing.Final = test_broker.context.get
+        mock_msg: typing.Final = MagicMock()
+        mock_msg.consumer._enable_auto_commit = True
+        mock_msg.committed = None  # must look like MANUAL ack to reach auto-commit check
 
-        def mock_get(key: str, default: typing.Any = None) -> typing.Any:
-            if key == "message":
-                mock_msg = MagicMock()
-                mock_msg.consumer._enable_auto_commit = True
-                mock_msg.committed = None  # must look like MANUAL ack to reach auto-commit check
-                return mock_msg
-            return original_get(key, default)
-
-        test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
-
-        with pytest.raises(RuntimeError, match=r"ack_policy=AckPolicy.MANUAL"):
+        with patched_message(test_broker, mock_msg), pytest.raises(RuntimeError, match=r"ack_policy=AckPolicy.MANUAL"):
             await test_broker.publish({"id": 1}, topic="auto-commit-topic")
 
         await asyncio.sleep(0)
@@ -358,18 +319,9 @@ async def test_middleware_no_handler_in_context_raises(setup_broker: KafkaBroker
     async def handler(msg: typing.Any) -> None: ...
 
     async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
-        # Override message with a MANUAL-ack mock so the middleware reaches the
-        # is_running check (FakeConsumer and non-MANUAL messages pass through first).
-        original_get: typing.Final = test_broker.context.get
-
-        def mock_get(key: str, default: typing.Any = None) -> typing.Any:
-            if key == "message":
-                return MockKafkaMessage()
-            return original_get(key, default)
-
-        test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
-
-        with pytest.raises(RuntimeError, match="Call `initialize_concurrent_processing`"):
+        # MANUAL-ack mock so the middleware reaches the is_running check
+        # (FakeConsumer and non-MANUAL messages pass through first).
+        with patched_message(test_broker), pytest.raises(RuntimeError, match="Call `initialize_concurrent_processing`"):
             await test_broker.publish({"id": 1}, topic="no-handler-topic")
 
 
@@ -388,19 +340,12 @@ async def test_middleware_non_manual_ack_passes_through_without_concurrent_proce
         processed.append(msg)
 
     async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
-        original_get: typing.Final = test_broker.context.get
+        mock_msg: typing.Final = MagicMock()
+        mock_msg.committed = MagicMock()  # non-None → auto-ack path
 
-        def mock_get(key: str, default: typing.Any = None) -> typing.Any:
-            if key == "message":
-                mock_msg = MagicMock()
-                mock_msg.committed = MagicMock()  # non-None → auto-ack path
-                return mock_msg
-            return original_get(key, default)
-
-        test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
-
-        # No initialize_concurrent_processing call — would raise for MANUAL ack
-        await test_broker.publish({"id": 1}, topic="auto-ack-topic")
+        with patched_message(test_broker, mock_msg):
+            # No initialize_concurrent_processing call — would raise for MANUAL ack
+            await test_broker.publish({"id": 1}, topic="auto-ack-topic")
 
     assert len(processed) == 1
 
@@ -472,63 +417,6 @@ async def test_middleware_stop_cleans_up_when_committer_dead(setup_broker: Kafka
         assert test_broker.context.get("concurrent_processing") is None
 
 
-async def test_middleware_handler_exception_logged_not_crashed(
-    setup_broker: KafkaBroker, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level(logging.ERROR)
-
-    @setup_broker.subscriber("handler-error-topic", group_id="handler-error-group")
-    async def handler(msg: typing.Any) -> None:
-        msg = "Handler failed"
-        raise ValueError(msg)
-
-    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
-        await initialize_concurrent_processing(
-            context=test_broker.context,
-            commit_batch_size=10,
-            commit_batch_timeout_sec=5,
-        )
-
-        try:
-            # TestKafkaBroker uses FakeConsumer — middleware passes through, so handler
-            # exceptions propagate directly from publish rather than being logged.
-            with pytest.raises(ValueError, match="Handler failed"):
-                await test_broker.publish({"id": 1}, topic="handler-error-topic")
-        finally:
-            await stop_concurrent_processing(test_broker.context)
-
-
-async def test_middleware_concurrency_limiter_release_on_error(setup_broker: KafkaBroker) -> None:
-    failed: typing.Final = []
-    expected_fails: typing.Final = 2
-
-    @setup_broker.subscriber("limiter-error-topic", group_id="limiter-error-group")
-    async def handler(msg: typing.Any) -> None:
-        failed.append(msg)
-        msg = "Failed"
-        raise ValueError(msg)
-
-    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
-        await initialize_concurrent_processing(
-            context=test_broker.context,
-            commit_batch_size=10,
-            commit_batch_timeout_sec=5,
-            concurrency_limit=1,
-        )
-
-        try:
-            # TestKafkaBroker uses FakeConsumer — middleware passes through, so handler
-            # exceptions propagate directly and the concurrency limiter is not involved.
-            with pytest.raises(ValueError, match="Failed"):
-                await test_broker.publish({"id": 1}, topic="limiter-error-topic")
-            with pytest.raises(ValueError, match="Failed"):
-                await test_broker.publish({"id": 2}, topic="limiter-error-topic")
-        finally:
-            await stop_concurrent_processing(test_broker.context)
-
-    assert len(failed) == expected_fails
-
-
 async def test_middleware_start_stop_reinitialize(setup_broker: KafkaBroker) -> None:
     """Handler can be stopped and re-initialized; the second instance is fresh and healthy."""
     async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
@@ -547,29 +435,6 @@ async def test_middleware_start_stop_reinitialize(setup_broker: KafkaBroker) -> 
         assert second_handler is not first_handler
 
         await stop_concurrent_processing(test_broker.context)
-
-
-async def test_middleware_general_exception_wrapped(
-    setup_broker: KafkaBroker, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level(logging.ERROR)
-
-    @setup_broker.subscriber("general-error-topic", group_id="general-error-group")
-    async def handler(msg: typing.Any) -> None: ...
-
-    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
-        await initialize_concurrent_processing(
-            context=test_broker.context,
-            commit_batch_size=10,
-            commit_batch_timeout_sec=5,
-        )
-
-        try:
-            # TestKafkaBroker uses FakeConsumer — middleware passes through directly,
-            # so handle_task is never called. Message is processed without error.
-            await test_broker.publish({"id": 1}, topic="general-error-topic")
-        finally:
-            await stop_concurrent_processing(test_broker.context)
 
 
 async def test_middleware_fake_consumer_no_commit_error(

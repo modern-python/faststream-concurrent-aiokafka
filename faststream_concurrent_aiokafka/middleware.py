@@ -8,19 +8,15 @@ import weakref
 from faststream import BaseMiddleware, ContextRepo
 from faststream.kafka.message import KafkaAckableMessage
 
+from faststream_concurrent_aiokafka import consts
 from faststream_concurrent_aiokafka.batch_committer import CommitterIsDeadError, KafkaBatchCommitter
-from faststream_concurrent_aiokafka.processing import (
-    DEFAULT_CONCURRENCY_LIMIT,
-    DEFAULT_SHUTDOWN_TIMEOUT_SEC,
-    KafkaConcurrentHandler,
-)
+from faststream_concurrent_aiokafka.processing import KafkaConcurrentHandler
 
 
 if typing.TYPE_CHECKING:
     from faststream.kafka import ConsumerRecord
 
 
-_PROCESSING_CONTEXT_KEY: typing.Final = "concurrent_processing"
 logger = logging.getLogger(__name__)
 
 
@@ -57,7 +53,7 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
         call_next: typing.Callable[[KafkaAckableMessage], typing.Awaitable[typing.Any]],
         msg: KafkaAckableMessage,
     ) -> typing.Any:  # noqa: ANN401
-        concurrent_processing: typing.Final[KafkaConcurrentHandler] = self.context.get(_PROCESSING_CONTEXT_KEY)
+        concurrent_processing: typing.Final[KafkaConcurrentHandler] = self.context.get(consts.PROCESSING_CONTEXT_KEY)
         kafka_message: typing.Final = self.context.get("message")
         if not kafka_message:
             err = "No Kafka message found in context. Ensure the middleware is used with a Kafka subscriber."
@@ -117,12 +113,12 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
 
 async def initialize_concurrent_processing(
     context: ContextRepo,
-    concurrency_limit: int = DEFAULT_CONCURRENCY_LIMIT,
-    commit_batch_size: int = 10,
-    commit_batch_timeout_sec: float = 10.0,
-    shutdown_timeout_sec: float = DEFAULT_SHUTDOWN_TIMEOUT_SEC,
+    concurrency_limit: int = consts.DEFAULT_CONCURRENCY_LIMIT,
+    commit_batch_size: int = consts.DEFAULT_COMMIT_BATCH_SIZE,
+    commit_batch_timeout_sec: float = consts.DEFAULT_COMMIT_BATCH_TIMEOUT_SEC,
+    shutdown_timeout_sec: float = consts.DEFAULT_SHUTDOWN_TIMEOUT_SEC,
 ) -> KafkaConcurrentHandler:
-    existing: KafkaConcurrentHandler | None = context.get(_PROCESSING_CONTEXT_KEY)
+    existing: KafkaConcurrentHandler | None = context.get(consts.PROCESSING_CONTEXT_KEY)
     if existing and existing.is_running:
         logger.warning("Kafka middleware. Processing is already active")
         return existing
@@ -136,7 +132,7 @@ async def initialize_concurrent_processing(
         concurrency_limit=concurrency_limit,
     )
     await concurrent_processing.start()
-    context.set_global(_PROCESSING_CONTEXT_KEY, concurrent_processing)
+    context.set_global(consts.PROCESSING_CONTEXT_KEY, concurrent_processing)
     logger.info("Kafka middleware. Concurrent processing is active")
     return concurrent_processing
 
@@ -144,10 +140,10 @@ async def initialize_concurrent_processing(
 async def stop_concurrent_processing(
     context: ContextRepo,
 ) -> None:
-    concurrent_processing: typing.Final[KafkaConcurrentHandler | None] = context.get(_PROCESSING_CONTEXT_KEY)
+    concurrent_processing: typing.Final[KafkaConcurrentHandler | None] = context.get(consts.PROCESSING_CONTEXT_KEY)
     if concurrent_processing is None or not concurrent_processing.is_running:
         logger.warning("Kafka middleware. Concurrent processing is not running. Cannot stop")
         return
 
     await concurrent_processing.stop()
-    context.set_global(_PROCESSING_CONTEXT_KEY, None)
+    context.set_global(consts.PROCESSING_CONTEXT_KEY, None)
