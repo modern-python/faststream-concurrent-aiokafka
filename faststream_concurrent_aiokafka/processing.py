@@ -1,7 +1,5 @@
 import asyncio
-import functools
 import logging
-import signal
 import typing
 
 from faststream.kafka import ConsumerRecord, TopicPartition
@@ -15,7 +13,6 @@ from faststream_concurrent_aiokafka.rebalance import ConsumerRebalanceListener
 logger = logging.getLogger(__name__)
 
 
-SIGNALS: typing.Final = (signal.SIGTERM, signal.SIGINT)
 DEFAULT_CONCURRENCY_LIMIT: typing.Final = 10
 DEFAULT_SHUTDOWN_TIMEOUT_SEC: typing.Final = 20.0
 
@@ -25,42 +22,25 @@ class KafkaConcurrentHandler:
         self,
         committer: KafkaBatchCommitter,
         concurrency_limit: int = DEFAULT_CONCURRENCY_LIMIT,
-        shutdown_timeout_sec: float = DEFAULT_SHUTDOWN_TIMEOUT_SEC,
     ) -> None:
         if concurrency_limit < 1:
             msg = f"concurrency_limit must be >= 1, got {concurrency_limit}"
             raise ValueError(msg)
 
         self._limiter = asyncio.Semaphore(concurrency_limit)
-        # Counter + Event replace the old _current_tasks set: shutdown waits on the event,
-        # which is set once every tracked task has fired its done-callback.
-        self._tracked_count: int = 0
-        self._all_done_event: asyncio.Event = asyncio.Event()
-        self._all_done_event.set()  # 0 tasks ⇒ "all done" is True
+        # Tracked only so stop() can cancel them. The committer is the source of truth for
+        # offset progress; this set just lets us reach in-flight tasks at shutdown.
+        self._tracked_tasks: set[asyncio.Task[typing.Any]] = set()
         self._is_running: bool = False
         self._committer: KafkaBatchCommitter = committer
-        self._stop_task: asyncio.Task[typing.Any] | None = None
-        self._shutdown_timeout_sec: float = shutdown_timeout_sec
-
-    async def wait_for_subtasks(self) -> None:
-        logger.info("Kafka middleware. Gracefully waiting for tasks to end...")
-        try:
-            await asyncio.wait_for(
-                self._all_done_event.wait(),
-                timeout=self._shutdown_timeout_sec,
-            )
-        except TimeoutError:
-            logger.exception("Kafka middleware. Whoops, some tasks haven't finished in graceful time, sorry")
 
     def _finish_task(self, task: asyncio.Task[typing.Any]) -> None:
         self._limiter.release()
+        self._tracked_tasks.discard(task)
         if not task.cancelled():
             exc: typing.Final[BaseException | None] = task.exception()
             if exc:
                 logger.error("Kafka middleware. Task has failed with the exception", exc_info=exc)
-        self._tracked_count -= 1
-        if self._tracked_count == 0:
-            self._all_done_event.set()
 
     async def handle_task(
         self,
@@ -70,13 +50,7 @@ class KafkaConcurrentHandler:
     ) -> None:
         await self._limiter.acquire()
         task: typing.Final = asyncio.ensure_future(coroutine)
-        # Increment + clear before add_done_callback so the counter already reflects this
-        # task by the time _finish_task can run. add_done_callback always schedules via
-        # loop.call_soon (never synchronous), but the callback could fire on the very next
-        # tick — once we yield at the send_task await below — so the bookkeeping must be
-        # consistent before that point.
-        self._tracked_count += 1
-        self._all_done_event.clear()
+        self._tracked_tasks.add(task)
         task.add_done_callback(self._finish_task)
         try:
             await self._committer.send_task(
@@ -92,19 +66,6 @@ class KafkaConcurrentHandler:
             await self.stop()
             raise
 
-    def _setup_signal_handlers(self) -> None:
-        loop: typing.Final = asyncio.get_running_loop()
-        for sig in SIGNALS:
-            loop.add_signal_handler(
-                sig,
-                functools.partial(self._signal_handler, sig),
-            )
-            logger.debug(f"Kafka middleware. Registered handler for {sig.name}")
-
-    def _signal_handler(self, sig: signal.Signals) -> None:
-        logger.info(f"Kafka middleware. Received signal {sig.name}, initiating graceful shutdown...")
-        self._stop_task = asyncio.create_task(self.stop())
-
     async def start(self) -> None:
         if self._is_running:
             return
@@ -113,7 +74,6 @@ class KafkaConcurrentHandler:
         self._is_running = True
 
         self._committer.spawn()
-        self._setup_signal_handlers()
         logger.info("Kafka middleware is ready to process messages.")
 
     async def stop(self) -> None:
@@ -122,15 +82,15 @@ class KafkaConcurrentHandler:
         logger.info("Kafka middleware. Shutting down middleware handler")
         self._is_running = False
 
-        await self._committer.close()
-        await self.wait_for_subtasks()
+        # Cancel in-flight user tasks. The committer treats cancelled tasks as a hard
+        # offset boundary (batch_committer._extract_ready_prefixes / _map_offsets_per_partition):
+        # cancelled-and-after offsets stay uncommitted and get redelivered on restart.
+        for task in list(self._tracked_tasks):
+            if not task.done():
+                task.cancel()
 
-        try:
-            loop = asyncio.get_running_loop()
-            for sig in SIGNALS:
-                loop.remove_signal_handler(sig)
-        except Exception:  # noqa: BLE001
-            logger.warning("Kafka middleware. Exception raised while removing signal handlers", exc_info=True)
+        await self._committer.close()
+
         logger.info("Kafka middleware. Complete shutting down middleware handler")
 
     def create_rebalance_listener(self) -> ConsumerRebalanceListener:

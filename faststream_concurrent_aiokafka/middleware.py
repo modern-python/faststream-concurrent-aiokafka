@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import dataclasses
 import logging
@@ -105,6 +106,12 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
             # The user handler already fired; the offset stays uncommitted, so the message
             # will be redelivered on restart (at-least-once).
             logger.warning("Kafka middleware. Handler is shutting down, skipping message")
+        except asyncio.CancelledError:
+            # stop() cancelled this task while handle_task was awaiting send_task. Offset
+            # stays uncommitted → redelivered on restart. Propagate so FastStream's chain
+            # can run its own cleanup.
+            logger.warning("Kafka middleware. Task cancelled during shutdown")
+            raise
         return None
 
 
@@ -127,7 +134,6 @@ async def initialize_concurrent_processing(
             shutdown_timeout_sec=shutdown_timeout_sec,
         ),
         concurrency_limit=concurrency_limit,
-        shutdown_timeout_sec=shutdown_timeout_sec,
     )
     await concurrent_processing.start()
     context.set_global(_PROCESSING_CONTEXT_KEY, concurrent_processing)
