@@ -14,8 +14,8 @@ By default FastStream processes Kafka messages sequentially — one message at a
 - Configurable concurrency limit (semaphore-based)
 - Batch offset committing per partition after each task completes
 - Rebalance-safe: pending offsets are flushed on partition revocation via `ConsumerRebalanceListener`
-- Graceful shutdown: waits up to `shutdown_timeout_sec` (default 20 s) for in-flight tasks before exiting
-- Signal handling (SIGTERM / SIGINT) triggers graceful shutdown
+- Fast shutdown: cancels in-flight tasks; uncommitted offsets are redelivered on restart (at-least-once)
+- Signal handling owned by your lifespan / process manager — this lib does not register SIGTERM/SIGINT handlers
 - Handler exceptions are logged but do not crash the consumer
 - Health check helper to probe handler status from a `ContextRepo`
 
@@ -110,13 +110,13 @@ Create and start the concurrent processing handler; store it in FastStream's con
 | `concurrency_limit` | `10` | Max concurrent asyncio tasks (minimum: 1) |
 | `commit_batch_size` | `10` | Max messages per commit batch |
 | `commit_batch_timeout_sec` | `10.0` | Max seconds before flushing a batch |
-| `shutdown_timeout_sec` | `20.0` | Max seconds to wait for the batch committer to flush AND for in-flight handlers to finish during graceful shutdown |
+| `shutdown_timeout_sec` | `20.0` | Max seconds the batch committer waits for its background task to drain before forcing cancellation |
 
 Returns the `KafkaConcurrentHandler` instance.
 
 ### `stop_concurrent_processing(context)`
 
-Flush pending commits, wait for in-flight tasks (up to `shutdown_timeout_sec`), then stop the handler.
+Cancel all in-flight handler tasks, flush completed offsets via the committer, then stop the handler. Uncommitted offsets (from cancelled tasks or anything queued past a cancelled offset) are redelivered on restart — at-least-once.
 
 ### `is_kafka_handler_healthy(context)`
 
@@ -150,7 +150,20 @@ modern_di_faststream.setup_di(app, container=container)    # registered after �
 
 4. **Rebalance handling**: When Kafka revokes a partition, the `ConsumerRebalanceListener` (returned by `handler.create_rebalance_listener()`) calls `committer.commit_all()` to flush pending offsets before the partition is reassigned. This prevents in-flight messages from being redelivered to the new owner.
 
-5. **Graceful shutdown**: `stop_concurrent_processing` flushes the committer, then awaits all in-flight tasks via an `asyncio.Event` (set when the in-flight counter reaches zero) bounded by `shutdown_timeout_sec` (default 20 s), then removes the signal handlers.
+5. **Shutdown**: `stop_concurrent_processing` cancels every in-flight asyncio task, then awaits `committer.close()`. The committer treats cancelled tasks as a hard offset boundary — cancelled-and-after offsets stay uncommitted and get redelivered on restart. Total wall-clock is sub-second in normal conditions and bounded by `shutdown_timeout_sec` only as a safety net for stuck network commits.
+
+## Migration from < 0.x
+
+Previously, `stop_concurrent_processing` waited up to `2 × shutdown_timeout_sec` for in-flight handlers to drain to completion. The new behavior cancels them immediately. The at-least-once contract is unchanged — uncommitted offsets are redelivered on restart, the same way they always were when the handler crashed mid-task.
+
+| What changed | Old | New |
+|---|---|---|
+| In-flight handler tasks on stop | drained to completion | **cancelled** |
+| `KafkaConcurrentHandler.wait_for_subtasks()` | public method | removed |
+| `shutdown_timeout_sec` | applied separately to handler and committer | applied to committer only |
+| Signal handler installation | installed automatically | removed — own them via your lifespan / process manager |
+
+If your handlers do non-idempotent work that's expensive to repeat, ensure your handlers are wrapped in `try/finally` so cleanup runs on `CancelledError`, or pin to the previous version of this library. To trigger shutdown on SIGTERM/SIGINT, your lifespan or main entry point must catch the signal and call `stop_concurrent_processing(broker.context)` — under uvicorn / AsgiFastStream this happens automatically through the lifespan `finally` block.
 
 ## Requirements
 

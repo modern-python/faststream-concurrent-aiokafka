@@ -33,8 +33,8 @@ async def test_middleware_simple_message_processing(setup_broker: KafkaBroker) -
     async def handler(msg: typing.Any) -> None:
         processed_messages.append(msg)
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
-        hdl: typing.Final = await initialize_concurrent_processing(
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
+        await initialize_concurrent_processing(
             context=test_broker.context,
             commit_batch_size=10,
             commit_batch_timeout_sec=5,
@@ -43,7 +43,6 @@ async def test_middleware_simple_message_processing(setup_broker: KafkaBroker) -
 
         try:
             await test_broker.publish({"id": 1, "data": "test"}, topic="test-topic")
-            await hdl.wait_for_subtasks()
         finally:
             await stop_concurrent_processing(test_broker.context)
 
@@ -63,16 +62,15 @@ async def test_middleware_multiple_messages_parallel(setup_broker: KafkaBroker) 
         timestamps.append(("end", msg["id"], asyncio.get_event_loop().time()))
         processed.append(msg)
 
-    hdl: typing.Final = await initialize_concurrent_processing(
+    await initialize_concurrent_processing(
         context=setup_broker.context, commit_batch_size=10, commit_batch_timeout_sec=5, concurrency_limit=3
     )
 
     async def test(inner_broker: KafkaBroker) -> None:
         for i in range(expected_size):
             await inner_broker.publish({"id": i}, topic="parallel-topic")
-        await hdl.wait_for_subtasks()
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         await test(test_broker)
 
     # TestKafkaBroker uses FakeConsumer — middleware passes through directly (sequential)
@@ -93,16 +91,15 @@ async def test_middleware_concurrency_limit_enforced(setup_broker: KafkaBroker) 
         concurrent[0] -= 1
         assert msg
 
-    hdl: typing.Final = await initialize_concurrent_processing(
+    await initialize_concurrent_processing(
         context=setup_broker.context, commit_batch_size=10, commit_batch_timeout_sec=5, concurrency_limit=2
     )
 
     async def test(inner_broker: KafkaBroker) -> None:
         for i in range(5):
             await inner_broker.publish({"id": i}, topic="limited-topic")
-        await hdl.wait_for_subtasks()
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         await test(test_broker)
     assert max_concurrent[0] <= concurrent_size, f"Concurrency limit exceeded: {max_concurrent[0]}"
 
@@ -115,8 +112,8 @@ async def test_middleware_handler_context_instance_stable(setup_broker: KafkaBro
     async def handler(msg: typing.Any) -> None:
         processed.append(msg)
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
-        hdl: typing.Final = await initialize_concurrent_processing(
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
+        await initialize_concurrent_processing(
             context=test_broker.context,
             commit_batch_size=10,
             commit_batch_timeout_sec=5,
@@ -126,7 +123,6 @@ async def test_middleware_handler_context_instance_stable(setup_broker: KafkaBro
         try:
             for i in range(3):
                 await test_broker.publish({"id": i}, topic="stable-topic")
-            await hdl.wait_for_subtasks()
         finally:
             await stop_concurrent_processing(test_broker.context)
 
@@ -135,7 +131,7 @@ async def test_middleware_handler_context_instance_stable(setup_broker: KafkaBro
 
 async def test_middleware_initialize_start_failure_raises(setup_broker: KafkaBroker) -> None:
     with patch.object(KafkaConcurrentHandler, "start", side_effect=Exception("Start failed")):
-        async with TestKafkaBroker(setup_broker) as test_broker:
+        async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
             with pytest.raises(Exception, match="Start failed"):
                 await initialize_concurrent_processing(
                     context=test_broker.context,
@@ -149,7 +145,7 @@ async def test_middleware_initialize_skips_when_already_running(
 ) -> None:
     caplog.set_level(logging.WARNING)
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         await initialize_concurrent_processing(
             context=test_broker.context,
             commit_batch_size=10,
@@ -180,7 +176,7 @@ async def test_middleware_shutting_down_skips_message(
     @setup_broker.subscriber("shutting-down-topic", group_id="shutting-down-group")
     async def handler(msg: typing.Any) -> None: ...
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         handler_instance: typing.Final = await initialize_concurrent_processing(
             context=test_broker.context,
             commit_batch_size=10,
@@ -223,7 +219,7 @@ async def test_middleware_catches_committer_is_dead_during_race(
     @setup_broker.subscriber("dead-committer-topic", group_id="dead-committer-group")
     async def handler(msg: typing.Any) -> None: ...
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         handler_instance: typing.Final = await initialize_concurrent_processing(
             context=test_broker.context,
             commit_batch_size=10,
@@ -256,12 +252,55 @@ async def test_middleware_catches_committer_is_dead_during_race(
         await stop_concurrent_processing(test_broker.context)
 
 
+async def test_middleware_logs_and_propagates_cancelled_error(
+    setup_broker: KafkaBroker, caplog: pytest.LogCaptureFixture
+) -> None:
+    """CancelledError raised by handle_task is logged and re-raised.
+
+    When stop() cancels a task while handle_task is awaiting send_task, the resulting
+    CancelledError must be logged and re-raised so FastStream's chain can clean up.
+    """
+    caplog.set_level(logging.WARNING)
+
+    @setup_broker.subscriber("cancel-topic", group_id="cancel-group")
+    async def handler(msg: typing.Any) -> None: ...
+
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
+        handler_instance: typing.Final = await initialize_concurrent_processing(
+            context=test_broker.context,
+        )
+
+        original_handle_task: typing.Final = handler_instance.handle_task
+
+        async def raising_handle_task(coro: typing.Any, *_args: typing.Any) -> None:
+            coro.close()
+            raise asyncio.CancelledError
+
+        handler_instance.handle_task = raising_handle_task  # ty: ignore[invalid-assignment]
+
+        original_get: typing.Final = test_broker.context.get
+
+        def mock_get(key: str, default: typing.Any = None) -> typing.Any:
+            if key == "message":
+                return MockKafkaMessage()
+            return original_get(key, default)
+
+        test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
+
+        with pytest.raises(asyncio.CancelledError):
+            await test_broker.publish({"id": 1}, topic="cancel-topic")
+        assert "Task cancelled during shutdown" in caplog.text
+
+        handler_instance.handle_task = original_handle_task  # ty: ignore[invalid-assignment]
+        await stop_concurrent_processing(test_broker.context)
+
+
 async def test_middleware_no_kafka_message_with_batch_processing_raises(setup_broker: KafkaBroker) -> None:
 
     @setup_broker.subscriber("no-kafka-msg-topic", group_id="no-kafka-msg-group")
     async def handler(msg: typing.Any) -> None: ...
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         await initialize_concurrent_processing(
             context=test_broker.context,
             commit_batch_size=10,
@@ -288,7 +327,7 @@ async def test_middleware_raises_if_auto_commit_enabled(setup_broker: KafkaBroke
     @setup_broker.subscriber("auto-commit-topic", group_id="auto-commit-group")
     async def handler(msg: typing.Any) -> None: ...
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         await initialize_concurrent_processing(
             context=test_broker.context,
             commit_batch_size=10,
@@ -318,7 +357,7 @@ async def test_middleware_no_handler_in_context_raises(setup_broker: KafkaBroker
     @setup_broker.subscriber("no-handler-topic", group_id="no-handler-group")
     async def handler(msg: typing.Any) -> None: ...
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         # Override message with a MANUAL-ack mock so the middleware reaches the
         # is_running check (FakeConsumer and non-MANUAL messages pass through first).
         original_get: typing.Final = test_broker.context.get
@@ -348,7 +387,7 @@ async def test_middleware_non_manual_ack_passes_through_without_concurrent_proce
     async def handler(msg: typing.Any) -> None:
         processed.append(msg)
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         original_get: typing.Final = test_broker.context.get
 
         def mock_get(key: str, default: typing.Any = None) -> typing.Any:
@@ -374,7 +413,7 @@ async def test_middleware_batch_processing_has_committer(setup_broker: KafkaBrok
     async def handler(msg: typing.Any) -> None:
         processed.append(msg)
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         handler_instance: typing.Final = await initialize_concurrent_processing(
             context=test_broker.context,
             commit_batch_size=10,
@@ -384,7 +423,6 @@ async def test_middleware_batch_processing_has_committer(setup_broker: KafkaBrok
         try:
             for i in range(expected_size):
                 await test_broker.publish({"id": i}, topic="batch-topic")
-            await handler_instance.wait_for_subtasks()
         finally:
             await stop_concurrent_processing(test_broker.context)
 
@@ -397,19 +435,18 @@ async def test_middleware_stop_without_start_is_noop(
 ) -> None:
     caplog.set_level(logging.WARNING)
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         await stop_concurrent_processing(test_broker.context)
         assert "Concurrent processing is not running" in caplog.text
 
 
 async def test_middleware_initialize_passes_shutdown_timeout(setup_broker: KafkaBroker) -> None:
-    """initialize_concurrent_processing forwards shutdown_timeout_sec to handler and committer."""
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    """initialize_concurrent_processing forwards shutdown_timeout_sec to the committer."""
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         handler: typing.Final = await initialize_concurrent_processing(
             context=test_broker.context, shutdown_timeout_sec=5.0
         )
         try:
-            assert handler._shutdown_timeout_sec == 5.0
             assert handler._committer._shutdown_timeout == 5.0
         finally:
             await stop_concurrent_processing(test_broker.context)
@@ -417,7 +454,7 @@ async def test_middleware_initialize_passes_shutdown_timeout(setup_broker: Kafka
 
 async def test_middleware_stop_cleans_up_when_committer_dead(setup_broker: KafkaBroker) -> None:
     """If the committer task has died, stop_concurrent_processing must still tear down the handler."""
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         handler: typing.Final = await initialize_concurrent_processing(context=test_broker.context)
 
         committer_task: typing.Final = handler._committer._commit_task
@@ -445,7 +482,7 @@ async def test_middleware_handler_exception_logged_not_crashed(
         msg = "Handler failed"
         raise ValueError(msg)
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         await initialize_concurrent_processing(
             context=test_broker.context,
             commit_batch_size=10,
@@ -471,7 +508,7 @@ async def test_middleware_concurrency_limiter_release_on_error(setup_broker: Kaf
         msg = "Failed"
         raise ValueError(msg)
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         await initialize_concurrent_processing(
             context=test_broker.context,
             commit_batch_size=10,
@@ -494,7 +531,7 @@ async def test_middleware_concurrency_limiter_release_on_error(setup_broker: Kaf
 
 async def test_middleware_start_stop_reinitialize(setup_broker: KafkaBroker) -> None:
     """Handler can be stopped and re-initialized; the second instance is fresh and healthy."""
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         first_handler: typing.Final = await initialize_concurrent_processing(
             context=test_broker.context, concurrency_limit=5
         )
@@ -520,7 +557,7 @@ async def test_middleware_general_exception_wrapped(
     @setup_broker.subscriber("general-error-topic", group_id="general-error-group")
     async def handler(msg: typing.Any) -> None: ...
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
         await initialize_concurrent_processing(
             context=test_broker.context,
             commit_batch_size=10,
@@ -545,8 +582,8 @@ async def test_middleware_fake_consumer_no_commit_error(
     async def handler(msg: typing.Any) -> None:
         pass
 
-    async with TestKafkaBroker(setup_broker) as test_broker:
-        hdl: typing.Final = await initialize_concurrent_processing(
+    async with TestKafkaBroker(setup_broker, connect_only=False) as test_broker:
+        await initialize_concurrent_processing(
             context=test_broker.context,
             commit_batch_size=10,
             commit_batch_timeout_sec=5,
@@ -554,7 +591,6 @@ async def test_middleware_fake_consumer_no_commit_error(
 
         try:
             await test_broker.publish({"id": 1}, topic="fake-consumer-topic")
-            await hdl.wait_for_subtasks()
         finally:
             await stop_concurrent_processing(test_broker.context)
 

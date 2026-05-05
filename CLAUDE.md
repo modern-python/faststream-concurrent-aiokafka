@@ -28,11 +28,12 @@ The library provides concurrent Kafka message processing for FastStream. Modules
 **`processing.py` — `KafkaConcurrentHandler`**
 The core engine. One handler is created per `initialize_concurrent_processing` call and stored in FastStream's `ContextRepo` under the key `"concurrent_processing"`. It is *not* a singleton — calling `stop_concurrent_processing` clears the context entry so a fresh handler can be initialised. The handler manages:
 - An `asyncio.Semaphore` for concurrency limiting (minimum: 1)
-- In-flight task tracking via a counter (`_tracked_count`) + `asyncio.Event` (`_all_done_event`); the per-task done-callback (`_finish_task`) releases the semaphore, decrements the counter, and sets the event when it reaches zero. `wait_for_subtasks` awaits the event with a timeout
-- Signal handlers (SIGTERM/SIGINT) that trigger graceful shutdown
+- A `set[asyncio.Task]` (`_tracked_tasks`) holding in-flight user tasks; the per-task done-callback (`_finish_task`) releases the semaphore and removes the task from the set
 - A `KafkaBatchCommitter` for offset commits
 
 Key design: `handle_task()` fires-and-forgets the user coroutine as an asyncio task and enqueues a `KafkaCommitTask` on the committer. Offsets are not committed until the user task finishes (at-least-once semantics).
+
+`stop()` cancels every in-flight tracked task, then awaits `committer.close()`. The committer treats cancelled tasks as a hard offset boundary (see `batch_committer.py`), so cancelled-and-after offsets stay uncommitted and get redelivered on restart. Total wall-clock for shutdown is bounded by the committer's own `shutdown_timeout_sec` (default 20 s) and is sub-second in normal conditions. The handler does *not* install signal handlers — shutdown is driven by the FastStream lifespan calling `stop_concurrent_processing`.
 
 **`middleware.py` — FastStream middleware + lifecycle functions**
 - `KafkaConcurrentProcessingMiddleware`: FastStream `BaseMiddleware` subclass. Its `consume_scope` retrieves the handler from `self.context`. It passes through (a) FakeConsumer (TestKafkaBroker) and (b) any subscriber whose ack policy is not MANUAL (`kafka_message.committed is not None`). It refuses if `_enable_auto_commit=True` on the consumer. If the handler has been stopped, it logs a warning and skips the message (the offset stays uncommitted, so the message is redelivered on restart).
