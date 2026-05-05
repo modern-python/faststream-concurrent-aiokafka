@@ -501,8 +501,9 @@ def test_committer_map_offsets_advances_to_max_per_partition(mock_consumer: Mock
 
 def test_extract_ready_prefixes_empty_pending() -> None:
     pending: dict[TopicPartition, list[KafkaCommitTask]] = {}
-    ready: typing.Final = KafkaBatchCommitter._extract_ready_prefixes(pending)
+    ready, ready_count = KafkaBatchCommitter._extract_ready_prefixes(pending)
     assert ready == {}
+    assert ready_count == 0
     assert pending == {}
 
 
@@ -519,9 +520,10 @@ def test_extract_ready_prefixes_all_done(mock_consumer: MockAIOKafkaConsumer) ->
     ]
     pending: dict[TopicPartition, list[KafkaCommitTask]] = {tp: list(tasks)}
 
-    ready: typing.Final = KafkaBatchCommitter._extract_ready_prefixes(pending)
+    ready, ready_count = KafkaBatchCommitter._extract_ready_prefixes(pending)
 
     assert ready == {tp: tasks}
+    assert ready_count == 3
     assert pending == {}  # partition emptied
 
 
@@ -550,9 +552,10 @@ def test_extract_ready_prefixes_blocks_on_first_pending(mock_consumer: MockAIOKa
     ]
     pending: dict[TopicPartition, list[KafkaCommitTask]] = {tp: list(tasks)}
 
-    ready: typing.Final = KafkaBatchCommitter._extract_ready_prefixes(pending)
+    ready, ready_count = KafkaBatchCommitter._extract_ready_prefixes(pending)
 
     assert ready == {tp: [tasks[0]]}  # only the prefix before offset 11
+    assert ready_count == 1
     assert pending[tp] == [tasks[1], tasks[2]]
 
 
@@ -585,9 +588,10 @@ def test_extract_ready_prefixes_cancelled_drops_partition(mock_consumer: MockAIO
     ]
     pending: dict[TopicPartition, list[KafkaCommitTask]] = {tp: list(tasks)}
 
-    ready: typing.Final = KafkaBatchCommitter._extract_ready_prefixes(pending)
+    ready, ready_count = KafkaBatchCommitter._extract_ready_prefixes(pending)
 
     assert ready == {tp: tasks}  # all three included in ready
+    assert ready_count == 3
     assert pending == {}  # partition emptied
 
 
