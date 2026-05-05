@@ -35,6 +35,18 @@ class KafkaCommitTask:
 
 @dataclasses.dataclass(kw_only=True, slots=True)
 class _StreamingState:
+    """Mutable state for the streaming committer loop.
+
+    Invariants maintained by `_streaming_iteration`:
+      * `pending_count == sum(len(v) for v in pending.values())`.
+      * `pending` empty ⇒ `timeout_deadline is None`.
+      * `flush_in_progress` is set only when a flush event fired *without*
+        `_stop_requested`; cleared once `pending` drains.
+      * `should_shutdown` is set only when a flush event fired *with*
+        `_stop_requested`; once set, the loop exits as soon as `pending`
+        drains.
+    """
+
     queue_get_task: asyncio.Task[KafkaCommitTask]
     flush_wait_task: asyncio.Task[bool]
     task_completed_wait_task: asyncio.Task[bool]
@@ -177,15 +189,17 @@ class KafkaBatchCommitter:
     @staticmethod
     def _extract_ready_prefixes(
         pending: dict[TopicPartition, list[KafkaCommitTask]],
-    ) -> dict[TopicPartition, list[KafkaCommitTask]]:
+    ) -> tuple[dict[TopicPartition, list[KafkaCommitTask]], int]:
         # Pending lists are maintained in offset order by _insert_sorted. Per partition, find
         # the first not-done task; tasks before it form the contiguous-done prefix and become
         # "ready". A cancelled task is treated as a hard boundary: cancelled + everything after
         # is dropped from pending and added to ready (so task_done() balances
         # messages_queue.join), while _map_offsets_per_partition stops the offset advance at
         # the cancelled task so the uncommitted offsets get redelivered on restart
-        # (at-least-once).
+        # (at-least-once). Returns (ready, count) so the caller can update its cached
+        # pending_count without re-summing list lengths.
         ready: dict[TopicPartition, list[KafkaCommitTask]] = {}
+        ready_count = 0
         empty_partitions: list[TopicPartition] = []
         for partition, partition_pending in pending.items():
             prefix_end = 0
@@ -200,13 +214,14 @@ class KafkaBatchCommitter:
 
             if prefix_end > 0:
                 ready[partition] = partition_pending[:prefix_end]
+                ready_count += prefix_end
                 del partition_pending[:prefix_end]
             if not partition_pending:
                 empty_partitions.append(partition)
 
         for k in empty_partitions:
             del pending[k]
-        return ready
+        return ready, ready_count
 
     async def _commit_partitions(self, ready: dict[TopicPartition, list[KafkaCommitTask]]) -> bool:
         # Task exception logging is handled by the handler's _finish_task done-callback so
@@ -337,9 +352,9 @@ class KafkaBatchCommitter:
         )
         if not commit_triggered:
             return {}
-        ready: typing.Final = self._extract_ready_prefixes(state.pending)
+        ready, ready_count = self._extract_ready_prefixes(state.pending)
         if ready:
-            state.pending_count -= sum(len(v) for v in ready.values())
+            state.pending_count -= ready_count
             await self._commit_partitions(ready)
         return ready
 

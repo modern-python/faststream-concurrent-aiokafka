@@ -9,7 +9,7 @@ if typing.TYPE_CHECKING:
     from faststream.kafka import TopicPartition
 
 
-class ConsumerRebalanceListener(BaseConsumerRebalanceListener):  # type: ignore[misc]
+class ConsumerRebalanceListener(BaseConsumerRebalanceListener):
     """Commits all pending offsets when Kafka revokes partitions during rebalance.
 
     Without this listener, in-flight message tasks whose offsets have not yet been
