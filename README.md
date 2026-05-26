@@ -169,3 +169,9 @@ If your handlers do non-idempotent work that's expensive to repeat, ensure your 
 
 - Python >= 3.11
 - `faststream[kafka]`
+
+## Part of `modern-python`
+
+Browse the full list of templates and libraries in
+[`modern-python`](https://github.com/modern-python) — see the org profile for the
+categorized index.
