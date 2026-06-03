@@ -4,6 +4,8 @@ import contextlib
 import typing
 from unittest.mock import AsyncMock, Mock
 
+from faststream.kafka import KafkaBroker, TestKafkaBroker
+
 
 class MockAIOKafkaConsumer:
     def __init__(self, group_id: str = "test-group") -> None:
@@ -90,3 +92,16 @@ def patched_message(broker: typing.Any, message: typing.Any = _DEFAULT_MESSAGE) 
         yield
     finally:
         broker.context.get = original_get
+
+
+@contextlib.asynccontextmanager
+async def fake_test_broker(broker: KafkaBroker, *, connect_only: bool = False) -> typing.AsyncIterator[KafkaBroker]:
+    """TestKafkaBroker for a single broker, narrowed to KafkaBroker.
+
+    faststream 0.7's TestKafkaBroker.__aenter__ returns Broker | list[Broker]
+    (variadic constructor). Every call site here passes one broker; this helper
+    keeps that invariant in one place so test bodies don't repeat the narrowing.
+    """
+    async with TestKafkaBroker(broker, connect_only=connect_only) as test_broker:
+        assert isinstance(test_broker, KafkaBroker)
+        yield test_broker

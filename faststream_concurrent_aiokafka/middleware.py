@@ -48,6 +48,9 @@ def _consumer_attrs(consumer: typing.Any) -> _ConsumerAttrs:  # noqa: ANN401
 
 
 class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
+    # KafkaAckableMessage narrowing documents the MANUAL-ack design center; auto-ack/Fake paths
+    # short-circuit before any narrowed access. Override widens to StreamMessage[Any] semantically
+    # but ty flags the parameter narrowing as a Liskov violation.
     async def consume_scope(  # ty: ignore[invalid-method-override]
         self,
         call_next: typing.Callable[[KafkaAckableMessage], typing.Awaitable[typing.Any]],
