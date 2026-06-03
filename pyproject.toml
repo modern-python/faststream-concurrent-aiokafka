@@ -25,7 +25,7 @@ classifiers = [
 ]
 version = "0"
 dependencies = [
-    "faststream[kafka]",
+    "faststream[kafka]>=0.6,<0.7",
 ]
 
 [project.urls]
@@ -82,7 +82,7 @@ isort.no-lines-before = ["standard-library", "local-folder"]
 ]
 
 [tool.pytest.ini_options]
-addopts = "-n auto --cov=. --cov-report term-missing"
+addopts = "-n auto --cov=. --cov-report term-missing --cov-fail-under=100"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 

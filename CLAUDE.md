@@ -21,6 +21,17 @@ uv run --no-sync pytest tests/test_kafka_committer.py
 uv run --no-sync pytest -k test_committer_logs_task_exceptions
 ```
 
+## Workflow
+
+Per-feature workflow: brainstorming → spec in
+`planning/specs/YYYY-MM-DD-<slug>-design.md` → writing-plans →
+plan in `planning/plans/YYYY-MM-DD-<slug>-plan.md` →
+executing-plans / subagent-driven-development →
+requesting-code-review → finishing-a-development-branch.
+
+Topic slugs are kebab-case descriptions (e.g. `faststream-0.7-migration`),
+not story IDs.
+
 ## Architecture
 
 The library provides concurrent Kafka message processing for FastStream. Modules:

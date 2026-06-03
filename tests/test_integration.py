@@ -358,11 +358,10 @@ async def test_real_kafka_multi_subscriber_commits_all_offsets(kafka_bootstrap_s
         await asyncio.sleep(CONSUMER_READY_SLEEP)
         try:
             await asyncio.sleep(POLL_SLEEP)
+            assert replayed_a == [], f"topic_a messages replayed after clean stop: {replayed_a}"
+            assert replayed_b == [], f"topic_b messages replayed after clean stop: {replayed_b}"
         finally:
             await stop_concurrent_processing(broker2.context)
-
-    assert replayed_a == [], f"topic_a messages replayed after clean stop: {replayed_a}"
-    assert replayed_b == [], f"topic_b messages replayed after clean stop: {replayed_b}"
 
 
 async def test_middleware_on_router(kafka_bootstrap_servers: str) -> None:
