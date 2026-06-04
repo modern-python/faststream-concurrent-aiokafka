@@ -62,7 +62,7 @@ purpose.
   now-unused imports (`contextlib`, `TestKafkaBroker`).
 - Replace all 24 `async with fake_test_broker(...) as test_broker:`
   callsites with `async with TestKafkaBroker(...) as test_broker:`:
-  - `tests/test_middleware.py` — 20 sites
+  - `tests/test_middleware.py` — 19 sites
   - `tests/test_healthcheck.py` — 4 sites
 - Update the imports in those two test modules: drop `fake_test_broker`
   from `from tests.mocks import ...`, add
@@ -75,7 +75,7 @@ purpose.
   this repo is middleware-only, defines no `TestBroker` subclass, and
   ships no ASGI registry hook. (The redis-timers package has both;
   faststream-concurrent-aiokafka has neither.)
-- No new regression test. The 24 inlined callsites already exercise the
+- No new regression test. The 23 inlined callsites already exercise the
   new `__aenter__` return shape on every `test_broker.publish(...)` /
   `test_broker.start()` / direct attribute access — an explicit guard
   test would only re-verify upstream's API.
@@ -84,7 +84,7 @@ purpose.
 
 ### `pyproject.toml`
 
-Current (line 30): `"faststream[kafka]>=0.7,<0.8",`
+Current (line 28): `"faststream[kafka]>=0.7,<0.8",`
 After:             `"faststream[kafka]>=0.7.1,<0.8",`
 
 ### `tests/mocks.py`
@@ -120,15 +120,16 @@ After:
 ```python
 """Shared mock classes used across multiple test modules."""
 
+import contextlib
 import typing
 from unittest.mock import AsyncMock, Mock
 ```
 
-`contextlib`, `KafkaBroker`, and `TestKafkaBroker` are all only
-referenced by the deleted helper, so the entire
-`from faststream.kafka import KafkaBroker, TestKafkaBroker` line and
-`import contextlib` are removed. `patched_message` and all `Mock*`
-classes are unaffected.
+`KafkaBroker` and `TestKafkaBroker` are only referenced by the deleted
+helper, so the entire `from faststream.kafka import KafkaBroker, TestKafkaBroker`
+line is removed. **`contextlib` stays** — `patched_message` further down
+in the file uses `@contextlib.contextmanager` (the sync variant). All
+`Mock*` classes and `patched_message` itself are unaffected.
 
 ### `tests/test_middleware.py`
 
@@ -137,7 +138,7 @@ classes are unaffected.
 - Line 19: `from tests.mocks import fake_test_broker, patched_message`
   → `from tests.mocks import patched_message`.
 
-- All 20 occurrences of
+- All 19 occurrences of
   `async with fake_test_broker(setup_broker) as test_broker:`
   → `async with TestKafkaBroker(setup_broker) as test_broker:`
 
