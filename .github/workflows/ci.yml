@@ -1,5 +1,4 @@
 name: main
-
 on:
   push:
     branches:
@@ -11,46 +10,5 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v2
-      - uses: astral-sh/setup-uv@v3
-        with:
-          enable-cache: true
-          cache-dependency-glob: "**/pyproject.toml"
-      - run: uv python install 3.13
-      - run: just install lint-ci
-
-  pytest:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version:
-          - "3.11"
-          - "3.12"
-          - "3.13"
-          - "3.14"
-    services:
-      redpanda:
-        image: redpandadata/redpanda:latest
-        ports:
-          - 9092:9092
-        options: >-
-          --health-cmd "rpk cluster health"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-        with:
-          enable-cache: true
-          cache-dependency-glob: "**/pyproject.toml"
-      - run: uv python install ${{ matrix.python-version }}
-      - run: uv sync
-      - run: uv run --no-sync pytest . --cov=. --cov-report xml
-        env:
-          KAFKA_BOOTSTRAP_SERVERS: localhost:9092
+  checks:
+    uses: ./.github/workflows/_checks.yml
