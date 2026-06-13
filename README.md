@@ -116,6 +116,8 @@ Create and start the concurrent processing handler; store it in FastStream's con
 
 Returns the `KafkaConcurrentHandler` instance.
 
+> **Tuning `max_uncommitted_tasks`:** each uncommitted entry holds only commit metadata — a task reference, its `TopicPartition`, offset, and consumer reference — not the message payload, so the default of `10000` is on the order of a few MB. Lower it to tighten the memory bound during a commit or broker outage, at the cost of stalling consumption sooner. Keep it `>= commit_batch_size` so size-based batching can still trigger (below that, commits fall back to the timeout/flush path); set it to `None` to disable the bound and restore unbounded buffering.
+
 ### `stop_concurrent_processing(context)`
 
 Cancel all in-flight handler tasks, flush completed offsets via the committer, then stop the handler. Uncommitted offsets (from cancelled tasks or anything queued past a cancelled offset) are redelivered on restart — at-least-once.
