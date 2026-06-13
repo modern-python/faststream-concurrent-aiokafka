@@ -36,7 +36,7 @@ async def test_rebalance_commit_all_is_awaited(committer: MockKafkaBatchCommitte
     """commit_all must be awaited (not fire-and-forget) so the rebalance blocks until flush completes."""
     flush_done: typing.Final = []
 
-    async def track_commit() -> None:
+    async def track_commit(*_args: object) -> None:
         flush_done.append(True)
 
     committer.commit_all = AsyncMock(side_effect=track_commit)
@@ -60,6 +60,13 @@ async def test_rebalance_on_partitions_revoked_clears_watermarks(
     committer.clear_cancellation_watermarks.assert_called_once_with(revoked)
 
 
+async def test_rebalance_forwards_flush_timeout(committer: MockKafkaBatchCommitter) -> None:
+    """The listener forwards its configured flush timeout to commit_all."""
+    listener: typing.Final = ConsumerRebalanceListener(committer, flush_timeout_sec=2.5)  # ty: ignore[invalid-argument-type]
+    await listener.on_partitions_revoked(set())
+    committer.commit_all.assert_called_once_with(2.5)
+
+
 async def test_rebalance_clear_runs_after_commit_all(committer: MockKafkaBatchCommitter) -> None:
     """clear_cancellation_watermarks must run after commit_all.
 
@@ -68,7 +75,7 @@ async def test_rebalance_clear_runs_after_commit_all(committer: MockKafkaBatchCo
     """
     order: typing.Final[list[str]] = []
 
-    async def track_commit_all() -> None:
+    async def track_commit_all(*_args: object) -> None:
         order.append("commit_all")
 
     def track_clear(_partitions: object) -> None:

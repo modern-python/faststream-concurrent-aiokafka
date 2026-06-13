@@ -1123,6 +1123,41 @@ async def test_committer_streaming_drains_on_close() -> None:
     consumer.commit.assert_called_once_with({tp: 105})
 
 
+async def test_commit_all_times_out_on_hung_handler(caplog: pytest.LogCaptureFixture) -> None:
+    """commit_all returns within flush_timeout_sec even if an in-flight task never completes."""
+    caplog.set_level(logging.WARNING)
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    committer.spawn()
+
+    async def hangs() -> None:
+        await asyncio.sleep(30)
+
+    hung_task: typing.Final = asyncio.create_task(hangs())
+    await committer.send_task(
+        KafkaCommitTask(
+            asyncio_task=hung_task,
+            offset=1,
+            consumer=consumer,
+            topic_partition=TopicPartition(topic="t", partition=0),
+        )
+    )
+
+    loop: typing.Final = asyncio.get_running_loop()
+    started: typing.Final = loop.time()
+    await committer.commit_all(flush_timeout_sec=0.1)
+    elapsed: typing.Final = loop.time() - started
+
+    assert elapsed < 1.0, f"commit_all blocked on the hung task ({elapsed:.2f}s)"
+    assert "flush timed out" in caplog.text
+    assert committer.is_healthy  # loop still running after a timed-out flush
+
+    hung_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await hung_task
+    await committer.close()
+
+
 async def test_committer_streaming_handles_requeue_offset_order() -> None:
     """Lazy offset sort tolerates re-queued tasks landing after higher-offset arrivals.
 
@@ -1173,3 +1208,125 @@ async def test_committer_streaming_handles_requeue_offset_order() -> None:
     # despite the requeued 100/101 arriving after offset 200 in queue order.
     final_call: typing.Final = consumer.commit.call_args_list[-1]
     assert final_call.args[0] == {tp: 201}
+
+
+async def test_send_task_blocks_when_uncommitted_ceiling_reached() -> None:
+    """send_task blocks once the uncommitted ceiling is hit, then unblocks as commits drain it."""
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    committer: typing.Final = KafkaBatchCommitter(
+        commit_batch_timeout_sec=10.0, commit_batch_size=100, max_uncommitted_tasks=2
+    )
+    commit_gate: typing.Final = asyncio.Event()
+
+    async def gated_commit(_offsets: object) -> None:
+        await commit_gate.wait()
+
+    consumer.commit.side_effect = gated_commit
+    committer.spawn()
+
+    async def done() -> None:
+        return None
+
+    tp: typing.Final = TopicPartition(topic="t", partition=0)
+
+    async def send(offset: int) -> None:
+        await committer.send_task(
+            KafkaCommitTask(
+                asyncio_task=asyncio.create_task(done()),
+                offset=offset,
+                consumer=consumer,
+                topic_partition=tp,
+            )
+        )
+
+    await send(1)
+    await send(2)  # count now at ceiling (2)
+
+    third: typing.Final = asyncio.create_task(send(3))
+    await asyncio.sleep(0.05)
+    assert not third.done(), "send_task should block at the uncommitted ceiling"
+
+    # Let the stalled commit complete → count drops → blocked send_task proceeds.
+    commit_gate.set()
+    await asyncio.wait_for(third, timeout=1.0)
+    assert third.done()
+
+    await committer.close()
+
+
+async def test_send_task_unbounded_when_ceiling_is_none() -> None:
+    """max_uncommitted_tasks=None preserves unbounded admission (no blocking)."""
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    committer: typing.Final = KafkaBatchCommitter(
+        commit_batch_timeout_sec=10.0, commit_batch_size=100, max_uncommitted_tasks=None
+    )
+    consumer.commit.side_effect = lambda _o: asyncio.sleep(30)  # never drains
+    committer.spawn()
+
+    async def done() -> None:
+        return None
+
+    tp: typing.Final = TopicPartition(topic="t", partition=0)
+    for offset in range(5):
+        await asyncio.wait_for(
+            committer.send_task(
+                KafkaCommitTask(
+                    asyncio_task=asyncio.create_task(done()),
+                    offset=offset,
+                    consumer=consumer,
+                    topic_partition=tp,
+                )
+            ),
+            timeout=1.0,
+        )  # never blocks
+
+    committer._commit_task.cancel()  # ty: ignore[unresolved-attribute]
+    with contextlib.suppress(asyncio.CancelledError):
+        await committer._commit_task  # ty: ignore[invalid-await]
+
+
+async def test_send_task_unblocks_with_dead_committer_error() -> None:
+    """A send_task blocked on the ceiling raises CommitterIsDeadError if the loop dies."""
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    committer: typing.Final = KafkaBatchCommitter(
+        commit_batch_timeout_sec=10.0, commit_batch_size=100, max_uncommitted_tasks=1
+    )
+
+    async def never_drains(_offsets: object) -> None:
+        await asyncio.sleep(30)  # never drains
+
+    consumer.commit.side_effect = never_drains
+    committer.spawn()
+
+    async def done() -> None:
+        return None
+
+    tp: typing.Final = TopicPartition(topic="t", partition=0)
+    await committer.send_task(
+        KafkaCommitTask(
+            asyncio_task=asyncio.create_task(done()),
+            offset=1,
+            consumer=consumer,
+            topic_partition=tp,
+        )
+    )  # count now at ceiling (1)
+
+    blocked: typing.Final = asyncio.create_task(
+        committer.send_task(
+            KafkaCommitTask(
+                asyncio_task=asyncio.create_task(done()),
+                offset=2,
+                consumer=consumer,
+                topic_partition=tp,
+            )
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert not blocked.done()
+
+    committer._commit_task.cancel()  # ty: ignore[unresolved-attribute]
+    with contextlib.suppress(asyncio.CancelledError):
+        await committer._commit_task  # ty: ignore[invalid-await]
+
+    with pytest.raises(CommitterIsDeadError):
+        await asyncio.wait_for(blocked, timeout=1.0)

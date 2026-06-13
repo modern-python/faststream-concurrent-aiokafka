@@ -74,6 +74,13 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
         if kafka_message.committed is not None:
             return await call_next(msg)
 
+        if isinstance(self.msg, (list, tuple)):
+            err = (
+                "KafkaConcurrentProcessingMiddleware does not support batch subscribers (batch=True). "
+                "Use a non-batch subscriber, or remove the middleware from this subscriber."
+            )
+            raise RuntimeError(err)  # noqa: TRY004
+
         if not concurrent_processing:
             err = "Concurrent processing is not running. Call `initialize_concurrent_processing` on app startup."
             raise RuntimeError(err)
@@ -114,12 +121,13 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
         return None
 
 
-async def initialize_concurrent_processing(
+async def initialize_concurrent_processing(  # noqa: PLR0913
     context: ContextRepo,
     concurrency_limit: int = consts.DEFAULT_CONCURRENCY_LIMIT,
     commit_batch_size: int = consts.DEFAULT_COMMIT_BATCH_SIZE,
     commit_batch_timeout_sec: float = consts.DEFAULT_COMMIT_BATCH_TIMEOUT_SEC,
     shutdown_timeout_sec: float = consts.DEFAULT_SHUTDOWN_TIMEOUT_SEC,
+    max_uncommitted_tasks: int | None = consts.DEFAULT_MAX_UNCOMMITTED_TASKS,
 ) -> KafkaConcurrentHandler:
     existing: KafkaConcurrentHandler | None = context.get(consts.PROCESSING_CONTEXT_KEY)
     if existing and existing.is_running:
@@ -131,6 +139,7 @@ async def initialize_concurrent_processing(
             commit_batch_timeout_sec=commit_batch_timeout_sec,
             commit_batch_size=commit_batch_size,
             shutdown_timeout_sec=shutdown_timeout_sec,
+            max_uncommitted_tasks=max_uncommitted_tasks,
         ),
         concurrency_limit=concurrency_limit,
     )

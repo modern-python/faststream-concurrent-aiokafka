@@ -1,15 +1,14 @@
 import asyncio
-import bisect
 import contextlib
 import dataclasses
 import logging
-import operator
 import typing
 
 from aiokafka.errors import CommitFailedError, IllegalStateError, KafkaError
 from faststream.kafka import TopicPartition
 
-from faststream_concurrent_aiokafka import consts
+from faststream_concurrent_aiokafka import _pending_state, consts
+from faststream_concurrent_aiokafka._pending_state import KafkaCommitTask
 
 
 if typing.TYPE_CHECKING:
@@ -19,18 +18,7 @@ if typing.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_OFFSET_KEY: typing.Final = operator.attrgetter("offset")
-
-
 class CommitterIsDeadError(Exception): ...
-
-
-@dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
-class KafkaCommitTask:
-    asyncio_task: asyncio.Task[typing.Any]
-    topic_partition: TopicPartition
-    offset: int
-    consumer: typing.Any
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
@@ -69,13 +57,7 @@ class _StreamingState:
 
 
 def _insert_sorted(partition_pending: list[KafkaCommitTask], new_ct: KafkaCommitTask) -> None:
-    # Common case: tasks arrive from the broker in offset order, so append is correct and
-    # the list stays sorted. Out-of-order arrivals only happen when _call_committer
-    # re-queues a batch on transient KafkaError; bisect handles the rare case in O(log N).
-    if not partition_pending or partition_pending[-1].offset <= new_ct.offset:
-        partition_pending.append(new_ct)
-    else:
-        bisect.insort(partition_pending, new_ct, key=_OFFSET_KEY)
+    _pending_state.insert_sorted(partition_pending, new_ct)
 
 
 class KafkaBatchCommitter:
@@ -84,6 +66,7 @@ class KafkaBatchCommitter:
         commit_batch_timeout_sec: float = consts.DEFAULT_COMMIT_BATCH_TIMEOUT_SEC,
         commit_batch_size: int = consts.DEFAULT_COMMIT_BATCH_SIZE,
         shutdown_timeout_sec: float = consts.DEFAULT_SHUTDOWN_TIMEOUT_SEC,
+        max_uncommitted_tasks: int | None = consts.DEFAULT_MAX_UNCOMMITTED_TASKS,
     ) -> None:
         self._messages_queue: asyncio.Queue[KafkaCommitTask] = asyncio.Queue()
         self._commit_task: asyncio.Task[typing.Any] | None = None
@@ -109,6 +92,17 @@ class KafkaBatchCommitter:
         # clear_cancellation_watermarks(partitions) resolve which consumer's watermark to
         # drop on rebalance without changing the listener's API.
         self._partition_owner: dict[TopicPartition, int] = {}
+
+        # Backpressure: count of tasks admitted via send_task but not yet finally
+        # committed/dropped (in _messages_queue + pending). When it reaches the
+        # ceiling, send_task blocks so the consume path stalls and the consumer stops
+        # fetching until commits catch up. None disables the bound.
+        self._max_uncommitted_tasks = max_uncommitted_tasks
+        self._uncommitted_count: int = 0
+        # Set whenever the count drops (a commit round) or the loop exits; wakes a
+        # send_task blocked at the ceiling so it re-checks.
+        self._uncommitted_drained = asyncio.Event()
+        self._uncommitted_drained.set()
 
     def _on_user_task_done(self, _task: asyncio.Future[typing.Any]) -> None:
         """Done-callback target for user tasks; wakes the streaming loop."""
@@ -142,6 +136,7 @@ class KafkaBatchCommitter:
             # Transient error — re-queue batch for retry on next cycle
             logger.exception("Error during commit to kafka, re-queuing batch")
             for task in tasks_batch:
+                self._uncommitted_count += 1
                 await self._messages_queue.put(task)
             return False
         else:
@@ -153,75 +148,13 @@ class KafkaBatchCommitter:
         consumer_tasks: list[KafkaCommitTask],
         watermarks: dict[tuple[int, TopicPartition], int],
     ) -> dict[TopicPartition, int]:
-        # `watermarks` is mutated: any cancelled task seen here records (or lowers) the
-        # (consumer, partition) watermark. Subsequent batches for the same consumer will see
-        # it and skip advancing past it. Other consumers (different group, same partition)
-        # have their own keys and are unaffected. Caller (the committer) owns the dict.
-        by_partition: dict[TopicPartition, list[KafkaCommitTask]] = {}
-        for task in consumer_tasks:
-            by_partition.setdefault(task.topic_partition, []).append(task)
-
-        partitions_to_offsets: dict[TopicPartition, int] = {}
-        for partition, tasks in by_partition.items():
-            wm_key: tuple[int, TopicPartition] = (consumer_id, partition)
-            max_offset: int | None = None
-            for task in sorted(tasks, key=_OFFSET_KEY):
-                if task.asyncio_task.cancelled():
-                    # Earliest cancelled wins: a later batch may not see the earlier
-                    # cancellation, so without min() we could forget it and accidentally
-                    # advance past the boundary.
-                    existing = watermarks.get(wm_key)
-                    if existing is None or task.offset < existing:
-                        watermarks[wm_key] = task.offset
-                    break
-                max_offset = task.offset
-            if max_offset is None:
-                continue
-            wm = watermarks.get(wm_key)
-            if wm is not None and (max_offset + 1) > wm:
-                # Advancing would jump past the cancelled boundary — skip this partition
-                # until the watermark is cleared on rebalance.
-                continue
-            # Kafka commits the *next* offset to fetch, so committed = processed_max + 1
-            partitions_to_offsets[partition] = max_offset + 1
-        return partitions_to_offsets
+        return _pending_state.map_offsets_per_partition(consumer_id, consumer_tasks, watermarks)
 
     @staticmethod
     def _extract_ready_prefixes(
         pending: dict[TopicPartition, list[KafkaCommitTask]],
     ) -> tuple[dict[TopicPartition, list[KafkaCommitTask]], int]:
-        # Pending lists are maintained in offset order by _insert_sorted. Per partition, find
-        # the first not-done task; tasks before it form the contiguous-done prefix and become
-        # "ready". A cancelled task is treated as a hard boundary: cancelled + everything after
-        # is dropped from pending and added to ready (so task_done() balances
-        # messages_queue.join), while _map_offsets_per_partition stops the offset advance at
-        # the cancelled task so the uncommitted offsets get redelivered on restart
-        # (at-least-once). Returns (ready, count) so the caller can update its cached
-        # pending_count without re-summing list lengths.
-        ready: dict[TopicPartition, list[KafkaCommitTask]] = {}
-        ready_count = 0
-        empty_partitions: list[TopicPartition] = []
-        for partition, partition_pending in pending.items():
-            prefix_end = 0
-            for index, task in enumerate(partition_pending):
-                if task.asyncio_task.cancelled():
-                    prefix_end = len(partition_pending)
-                    break
-                if not task.asyncio_task.done():
-                    prefix_end = index
-                    break
-                prefix_end = index + 1
-
-            if prefix_end > 0:
-                ready[partition] = partition_pending[:prefix_end]
-                ready_count += prefix_end
-                del partition_pending[:prefix_end]
-            if not partition_pending:
-                empty_partitions.append(partition)
-
-        for k in empty_partitions:
-            del pending[k]
-        return ready, ready_count
+        return _pending_state.extract_ready_prefixes(pending)
 
     async def _commit_partitions(self, ready: dict[TopicPartition, list[KafkaCommitTask]]) -> bool:
         # Task exception logging is handled by the handler's _finish_task done-callback so
@@ -248,6 +181,8 @@ class KafkaBatchCommitter:
 
         for _ in flat:
             self._messages_queue.task_done()
+        self._uncommitted_count -= len(flat)
+        self._uncommitted_drained.set()
         return all(results)
 
     async def _run_commit_process(self) -> None:
@@ -266,6 +201,7 @@ class KafkaBatchCommitter:
                 await self._streaming_iteration(state)
         finally:
             state.cancel_outstanding()
+            self._uncommitted_drained.set()
 
     async def _streaming_iteration(self, state: "_StreamingState") -> None:
         wait_targets: list[asyncio.Future[typing.Any]] = [
@@ -358,14 +294,23 @@ class KafkaBatchCommitter:
             await self._commit_partitions(ready)
         return ready
 
-    async def commit_all(self) -> None:
-        """Flush and commit all pending tasks without stopping the committer loop.
+    async def commit_all(self, flush_timeout_sec: float = consts.DEFAULT_REBALANCE_FLUSH_TIMEOUT_SEC) -> None:
+        """Flush and commit pending tasks without stopping the committer loop.
 
-        Safe to call during Kafka rebalance (on_partitions_revoked). The committer
-        continues running after this returns.
+        Bounded by ``flush_timeout_sec``: on timeout, already-completed offsets are
+        committed and any still-in-flight tasks stay uncommitted (redelivered after
+        reassignment — at-least-once). Safe to call during rebalance
+        (on_partitions_revoked); the committer keeps running after this returns.
         """
         self._flush_batch_event.set()
-        await self._messages_queue.join()
+        try:
+            await asyncio.wait_for(self._messages_queue.join(), timeout=flush_timeout_sec)
+        except TimeoutError:
+            logger.warning(
+                "Kafka middleware. commit_all flush timed out after %.1fs; "
+                "in-flight offsets will be redelivered on restart/reassignment",
+                flush_timeout_sec,
+            )
 
     def clear_cancellation_watermarks(self, partitions: typing.Iterable[TopicPartition] | None = None) -> None:
         """Forget cancellation watermarks for ``partitions`` (or all if ``None``).
@@ -386,6 +331,14 @@ class KafkaBatchCommitter:
 
     async def send_task(self, new_task: KafkaCommitTask) -> None:
         self._check_is_commit_task_running()
+        while self._max_uncommitted_tasks is not None and self._uncommitted_count >= self._max_uncommitted_tasks:
+            self._uncommitted_drained.clear()
+            # Re-check liveness before parking: if the loop died we must raise, not hang.
+            self._check_is_commit_task_running()
+            # Signal the committer loop to flush now so it can drain the count and unblock us.
+            self._flush_batch_event.set()
+            await self._uncommitted_drained.wait()
+        self._uncommitted_count += 1
         await self._messages_queue.put(new_task)
 
     def spawn(self) -> None:
