@@ -27,10 +27,16 @@ Per-feature workflow: brainstorming → spec in
 `planning/specs/YYYY-MM-DD-<slug>-design.md` → writing-plans →
 plan in `planning/plans/YYYY-MM-DD-<slug>-plan.md` →
 executing-plans / subagent-driven-development →
-requesting-code-review → finishing-a-development-branch.
+requesting-code-review → finishing-a-development-branch →
+release notes in `planning/releases/<version>.md`.
 
 Topic slugs are kebab-case descriptions (e.g. `faststream-0.7-migration`),
 not story IDs.
+
+Release notes are written when cutting a release (not per-feature):
+copy `planning/releases/TEMPLATE.md` to `planning/releases/<version>.md`
+(bare version, no `v` prefix) and link back to the driving spec in
+`planning/specs/`.
 
 ## Architecture
 
