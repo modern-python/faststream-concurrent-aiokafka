@@ -263,30 +263,62 @@ async def test_real_kafka_multiple_subscribers(kafka_bootstrap_servers: str) -> 
     assert sorted(processed_b) == list(range(n_each))
 
 
-async def test_real_kafka_graceful_shutdown_waits_for_tasks(kafka_bootstrap_servers: str) -> None:
-    """stop_concurrent_processing waits for in-flight tasks to complete before returning."""
-    completed: typing.Final[list[int]] = []
-    topic: typing.Final = _topic("shutdown")
-    broker: typing.Final = _broker(kafka_bootstrap_servers)
-
-    @broker.subscriber(topic, group_id="shutdown-group", auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
-    async def handler(msg: dict[str, int]) -> None:
-        await asyncio.sleep(0.5)
-        completed.append(msg["id"])
-
+async def test_real_kafka_shutdown_cancels_in_flight_tasks(kafka_bootstrap_servers: str) -> None:
+    """stop_concurrent_processing cancels in-flight handlers; their offsets are redelivered (at-least-once)."""
+    topic: typing.Final = _topic("shutdown-cancel")
+    group: typing.Final = f"shutdown-cancel-group-{uuid.uuid4().hex[:6]}"
     await _create_topic(kafka_bootstrap_servers, topic)
-    async with broker:
-        await broker.start()
+
+    # Phase 1: dispatch a handler that blocks; stop() while it is genuinely in-flight.
+    started: typing.Final = asyncio.Event()
+    cancelled_seen: typing.Final[list[bool]] = []
+    completed_phase1: typing.Final[list[int]] = []
+
+    broker1: typing.Final = _broker(kafka_bootstrap_servers)
+
+    @broker1.subscriber(topic, group_id=group, auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
+    async def handler1(msg: dict[str, int]) -> None:
+        started.set()
+        try:
+            await asyncio.sleep(30)  # far longer than the test window
+            completed_phase1.append(msg["id"])
+        except asyncio.CancelledError:
+            cancelled_seen.append(True)
+            raise
+
+    async with broker1:
+        await broker1.start()
         await initialize_concurrent_processing(
-            context=broker.context, commit_batch_size=10, commit_batch_timeout_sec=5, concurrency_limit=5
+            context=broker1.context, commit_batch_size=10, commit_batch_timeout_sec=5, concurrency_limit=5
         )
         await asyncio.sleep(CONSUMER_READY_SLEEP)
-        for i in range(3):
-            await broker.publish({"id": i}, topic=topic)
-        await asyncio.sleep(POLL_SLEEP)  # let messages be received and dispatched
-        await stop_concurrent_processing(broker.context)
+        await broker1.publish({"id": 1}, topic=topic)
+        await asyncio.wait_for(started.wait(), timeout=POLL_SLEEP)
+        # Stop while the handler is still sleeping → it must be cancelled, not awaited.
+        await stop_concurrent_processing(broker1.context)
 
-    assert len(completed) == 3
+    assert cancelled_seen == [True], "in-flight handler was not cancelled on stop"
+    assert completed_phase1 == [], "handler completed despite shutdown cancellation"
+
+    # Phase 2: restart with the same group id → the uncommitted message is redelivered.
+    replayed: typing.Final[list[int]] = []
+    broker2: typing.Final = _broker(kafka_bootstrap_servers)
+
+    @broker2.subscriber(topic, group_id=group, auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
+    async def handler2(msg: dict[str, int]) -> None:
+        replayed.append(msg["id"])
+
+    async with broker2:
+        await broker2.start()
+        await initialize_concurrent_processing(
+            context=broker2.context, commit_batch_size=10, commit_batch_timeout_sec=2, concurrency_limit=5
+        )
+        await asyncio.sleep(CONSUMER_READY_SLEEP)
+        try:
+            await asyncio.sleep(POLL_SLEEP)
+            assert replayed == [1], f"cancelled message was not redelivered: {replayed}"
+        finally:
+            await stop_concurrent_processing(broker2.context)
 
 
 async def test_real_kafka_multi_subscriber_commits_all_offsets(kafka_bootstrap_servers: str) -> None:
