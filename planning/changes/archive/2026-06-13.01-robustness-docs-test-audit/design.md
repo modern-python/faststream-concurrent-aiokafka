@@ -1,3 +1,13 @@
+---
+status: shipped
+date: 2026-06-13
+slug: robustness-docs-test-audit
+supersedes: null
+superseded_by: null
+pr: "32"
+outcome: "merged as #32; shipped in 0.6.0"
+---
+
 # Robustness, docs, and test audit — design
 
 **Date:** 2026-06-13

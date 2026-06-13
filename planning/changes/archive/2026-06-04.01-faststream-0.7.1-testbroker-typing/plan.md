@@ -1,3 +1,11 @@
+---
+status: shipped
+date: 2026-06-04
+slug: faststream-0.7.1-testbroker-typing
+spec: faststream-0.7.1-testbroker-typing
+pr: "29"
+---
+
 # FastStream 0.7.1 TestBroker typing alignment — implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -8,7 +16,7 @@
 
 **Tech Stack:** Python 3.11+, FastStream 0.7.1, aiokafka, pytest, uv, ty.
 
-**Spec:** [`planning/specs/2026-06-04-faststream-0.7.1-testbroker-typing-design.md`](../specs/2026-06-04-faststream-0.7.1-testbroker-typing-design.md)
+**Spec:** [`design.md`](./design.md)
 
 **Branch:** `chore/faststream-0.7.1-testbroker-typing` (already created).
 
