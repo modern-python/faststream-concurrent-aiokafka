@@ -497,3 +497,15 @@ async def test_middleware_fake_consumer_no_commit_error(
             await stop_concurrent_processing(test_broker.context)
 
     assert "Error during commit to kafka" not in caplog.text
+
+
+async def test_middleware_initialize_passes_max_uncommitted_tasks(setup_broker: KafkaBroker) -> None:
+    """initialize_concurrent_processing forwards max_uncommitted_tasks to the committer."""
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        handler: typing.Final = await initialize_concurrent_processing(
+            context=test_broker.context, max_uncommitted_tasks=500
+        )
+        try:
+            assert handler._committer._max_uncommitted_tasks == 500
+        finally:
+            await stop_concurrent_processing(test_broker.context)
