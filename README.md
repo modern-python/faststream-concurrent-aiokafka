@@ -120,7 +120,7 @@ Cancel all in-flight handler tasks, flush completed offsets via the committer, t
 
 ### `is_kafka_handler_healthy(context)`
 
-Returns `True` if the `KafkaConcurrentHandler` stored in `context` is running and healthy, `False` otherwise (not initialized, stopped, or observer task dead). Useful for readiness/liveness probes.
+Returns `True` if the `KafkaConcurrentHandler` stored in `context` is running and healthy, `False` otherwise (not initialized, stopped, or committer task dead). Useful for readiness/liveness probes.
 
 ### `KafkaConcurrentProcessingMiddleware`
 
