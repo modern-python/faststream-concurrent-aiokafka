@@ -1,0 +1,348 @@
+---
+status: approved
+date: 2026-06-13
+slug: portable-planning-convention
+supersedes: null
+superseded_by: null
+pr: null
+outcome: null
+---
+
+# Design: Adopt the portable OpenSpec-shaped planning convention
+
+## Summary
+
+Replace `faststream-concurrent-aiokafka`'s flat `planning/` layout
+(`specs/` of design docs, a flat `plans/`, a release template under
+`releases/`) with the **portable two-axis convention** already shipped in
+`faststream-outbox` (#77) and mirrored into `lite-bootstrap` (#120): a new
+`architecture/` directory at the repo root holds the *living truth* — what the
+system does now, one file per capability — and `planning/changes/` holds the
+*change history*, each change a self-contained folder bundle, `active/` →
+`archive/`. Shipping a change **promotes** its conclusions into the relevant
+`architecture/<capability>.md` by hand, then archives the bundle.
+
+The convention prose (`planning/README.md` "Conventions" section) and the three
+templates (`_templates/{design,plan,change}.md`) are copied **byte-identical**
+from `faststream-outbox`; only the repo-specific "Index" is authored fresh. The
+existing `planning/` artifacts are migrated into the new shape: each
+design(+plan) becomes a bundle under `changes/archive/`, and `planning/specs/`
+and `planning/plans/` are removed.
+
+Because this repo has **no `architecture/` today**, the migration also seeds it
+with four capability files drawn from `CLAUDE.md`'s Architecture section, so
+promotion has a real target from day one. `CLAUDE.md`'s existing `## Workflow`
+section is rewritten to the portable Workflow text, **preserving this repo's
+release-notes step** (added in #33).
+
+This change touches no runtime code, no test code, and no public API. It is the
+`faststream-concurrent-aiokafka` instance of the same convention adopted in
+`faststream-outbox` (#77) and `lite-bootstrap` (#120).
+
+## Motivation
+
+This repo's `planning/` predates the ecosystem convention and diverges from its
+sibling repos:
+
+- **No living-truth home.** The closest thing to "what the system does now" is
+  `CLAUDE.md`'s Architecture section — AI-instruction prose, not a navigable
+  capability reference, with no step that forces it current when behavior
+  changes. The 0.6.0 audit (#32) found `CLAUDE.md`/README drift precisely
+  because there was no truth home to promote into.
+
+- **No convention document.** There is no `planning/README.md`; the layout is
+  undocumented. `faststream-outbox` has converged on a portable convention
+  (#77) explicitly designed to drop into the other modern-python repos; this
+  change is that adoption here.
+
+- **`specs/` + `plans/` are two flat piles** with no grouping back to the
+  change that produced them. A reader cannot see, from location alone, that a
+  spec and its plan are one change.
+
+The portable convention resolves all three: it separates living truth
+(`architecture/`) from change history (`planning/changes/`), names the
+promotion boundary, and ships a single documented convention identical across
+the ecosystem.
+
+## Non-goals
+
+- **Rewriting or trimming archived prose.** Existing shipped specs/plans move
+  into the new layout verbatim; only their location and (for bundle `design.md`/
+  `plan.md`) frontmatter linkage change.
+
+- **Backfilling bundles for past tiny/lightweight changes.** #30 (ci/modern-di
+  alignment) and #31 (README standardization + LICENSE) shipped without a
+  spec/plan and are already folded into `releases/0.6.0.md`. They stay
+  unbundled — retroactively the Tiny/Lightweight lane.
+
+- **Authoring exhaustive `architecture/` prose.** The four seed files capture
+  current truth at the level `CLAUDE.md` already documents it. Future changes
+  deepen them via promotion.
+
+- **Formal OpenSpec spec-deltas.** No `ADDED`/`MODIFIED`/`REMOVED` blocks.
+  Promotion is a hand-edit of the affected `architecture/<capability>.md`,
+  recoverable via `git log -p`. (Same decision as `faststream-outbox` #77.)
+
+- **An index generator or frontmatter-lint CI job.** The README Index stays
+  hand-maintained.
+
+- **A `just docs-build` target.** Unlike `lite-bootstrap`, this repo has **no
+  mkdocs site**; there is nothing to strict-build. Verification is `just
+  lint-ci` + grep sweeps only.
+
+- **Touching `planning/releases/`.** `0.6.0.md` and the `TEMPLATE.md` added in
+  #33 stay exactly where they are; the README points to the template as a
+  repo-specific extra.
+
+## Design
+
+### 1. The model: two axes, never mixed
+
+The convention rests on one distinction, identical to `faststream-outbox`:
+
+> **`architecture/` (repo root) is the present.** One file per capability,
+> describing what the system does *now*. Living prose, updated whenever a change
+> ships. The truth home and promotion target.
+>
+> **`planning/changes/` is the past-and-pending.** One folder per change,
+> describing how a piece of behavior got (or will get) there. Frozen once
+> shipped.
+
+A reader wanting current truth reads `architecture/`; a reader wanting the
+rationale follows a promotion back to the archived change bundle.
+
+### 2. Target directory layout
+
+```
+architecture/                      # LIVING TRUTH (new) — promotion target, no frontmatter
+  concurrent-handler.md
+  batch-committer.md
+  middleware-lifecycle.md
+  rebalance.md
+
+planning/
+  README.md                        # Conventions (byte-identical) + Index (fresh)
+  changes/
+    active/
+      .gitkeep                     # empty after migration (all prior work shipped)
+    archive/
+      <YYYY-MM-DD.NN-slug>/        # one folder per shipped change
+        design.md                  # spec — the thinking            (FULL lane)
+        plan.md                    # plan — the sequencing          (FULL lane)
+  releases/                        # UNCHANGED
+    0.6.0.md
+    TEMPLATE.md                    # repo-specific extra (kept; from #33)
+  audits/                          # NEW — empty (.gitkeep); none today
+  retros/                          # NEW — empty (.gitkeep); none today
+  deferred.md                      # NEW — standard header, "none today"
+  _templates/
+    design.md  plan.md  change.md  # copied byte-identical from faststream-outbox
+```
+
+After migration, `planning/specs/` and `planning/plans/` no longer exist.
+
+### 3. `architecture/` seed — four capability files
+
+This repo has no `architecture/` today, so the migration creates it and seeds
+four capability files, synthesized from `CLAUDE.md`'s Architecture section.
+Living prose, **no frontmatter** (dated by git). Keep each file to the
+invariants a reader needs to understand the capability *now* — not change
+history.
+
+- **`architecture/concurrent-handler.md`** — `KafkaConcurrentHandler`
+  (`processing.py`): one handler per `initialize_concurrent_processing`, stored
+  in `ContextRepo` under `"concurrent_processing"` (not a singleton); the
+  `asyncio.Semaphore` (min 1); the `set[asyncio.Task]` `_tracked_tasks` and the
+  `_finish_task` done-callback; `handle_task()` fire-and-forget + enqueue a
+  `KafkaCommitTask`; at-least-once (offsets commit only after the user task
+  finishes); `stop()` cancels in-flight tasks then awaits `committer.close()`;
+  cancelled-as-hard-boundary; no signal handlers (shutdown driven by lifespan).
+
+- **`architecture/batch-committer.md`** — `KafkaBatchCommitter`
+  (`batch_committer.py`): the `spawn()` background task + streaming loop;
+  per-partition pending state; `_extract_ready_prefixes` (sort-by-offset,
+  stop-at-first-not-done, cancelled = hard boundary) and
+  `_map_offsets_per_partition`; commit triggers (`commit_batch_size`,
+  `commit_batch_timeout_sec`, flush event); per-consumer-id
+  `consumer.commit({TopicPartition: max_offset+1})`; error policy (transient
+  `KafkaError` re-queues; `CommitFailedError`/`IllegalStateError` discards);
+  `max_uncommitted_tasks` backpressure; `CommitterIsDeadError` →
+  `handler.stop()`.
+
+- **`architecture/middleware-lifecycle.md`** — `middleware.py` +
+  `healthcheck.py`: `KafkaConcurrentProcessingMiddleware.consume_scope`
+  pass-through rules (FakeConsumer; non-MANUAL ack; refuse `_enable_auto_commit`;
+  batch-subscriber `RuntimeError` guard; stopped-handler skip → redelivery);
+  `initialize_concurrent_processing` / `stop_concurrent_processing` (context
+  storage + gating on `is_running`); `is_kafka_handler_healthy` for
+  readiness/liveness.
+
+- **`architecture/rebalance.md`** — `ConsumerRebalanceListener`
+  (`rebalance.py`): `create_rebalance_listener(flush_timeout_sec=...)`; on
+  `on_partitions_revoked` calls `committer.commit_all()` (bounded by
+  `flush_timeout_sec`, default 10 s) to flush before reassignment, preventing
+  duplicate processing after rebalance.
+
+Four cohesive files are the starting granularity; finer splits can come later
+via normal changes.
+
+### 4. Migration mapping
+
+Each existing design (and its plan, where one exists) becomes a bundle under
+`changes/archive/`. `.NN` is assigned by merge order per date. `git mv`
+throughout to preserve blame.
+
+| Bundle | design.md ← | plan.md ← | PR |
+|--------|-------------|-----------|----|
+| `2026-06-03.01-faststream-0.7-migration` | `specs/2026-06-03-faststream-0.7-migration-design.md` | — (plan was deleted in `ede4237`; design-only) | #28 |
+| `2026-06-04.01-faststream-0.7.1-testbroker-typing` | `specs/2026-06-04-faststream-0.7.1-testbroker-typing-design.md` | `plans/2026-06-04-faststream-0.7.1-testbroker-typing-plan.md` | #29 |
+| `2026-06-13.01-robustness-docs-test-audit` | `specs/2026-06-13-robustness-docs-test-audit-design.md` | `plans/2026-06-13-robustness-docs-test-audit-plan.md` | #32 |
+| `2026-06-13.02-codify-release-notes` | `specs/2026-06-13-codify-release-notes-design.md` | `plans/2026-06-13-codify-release-notes-plan.md` | #33 |
+
+The `faststream-0.7-migration` bundle is **design-only** — its plan was
+intentionally removed once executed (`ede4237`, "remove executed 0.7 migration
+plans; keep spec"). This is a valid full-lane bundle missing its (deleted) plan;
+no plan is reconstructed.
+
+**Same-date `.NN`:** 2026-06-13 has two bundles — robustness-audit (#32, merged
+first) is `.01`; codify-release-notes (#33) is `.02`; this convention change
+(this bundle) is `.03`.
+
+**Frontmatter:** each bundle's `design.md` gets full YAML frontmatter
+(`status: shipped`, `date`, `slug`, `supersedes`/`superseded_by`, `pr`,
+`outcome`); each `plan.md` gets `plan.md` frontmatter (`status`, `date`, `slug`,
+`spec`, `pr`). No supersedes/superseded_by links exist among this repo's four
+historical changes.
+
+**Not migrated:** #30 (ci/modern-di) and #31 (README+LICENSE) had no spec/plan
+and stay unbundled (folded into `releases/0.6.0.md`).
+
+### 5. The convention doc (`planning/README.md`)
+
+Two sections:
+
+1. **Conventions** — copied **byte-identical** from
+   `faststream-outbox/planning/README.md` (the block from `## Conventions`
+   through the end of `### Frontmatter`, i.e. everything before `## Index`).
+   This is the portable core, identical across repos; not a word is edited.
+2. **Index** + **Other** — authored **fresh** for this repo. Lists Active (none
+   after migration) and Archived (the four migrated bundles, one line each with
+   PR + date), plus an "Other" pointer block to `architecture/` (the promotion
+   target), `releases/` (with a pointer to `TEMPLATE.md` as the repo-specific
+   extra), `audits/`, `retros/`, and `deferred.md`.
+
+### 6. `_templates/`
+
+Copy all three template files byte-identical from
+`faststream-outbox/planning/_templates/`: `design.md`, `plan.md`, `change.md`.
+Their `changes/active/` path references are already correct for this layout.
+`releases/TEMPLATE.md` is **not** moved into `_templates/` (it is a
+release-notes template, repo-specific; kept under `releases/`).
+
+### 7. `CLAUDE.md` update
+
+This repo already has a `## Workflow` section (referencing `planning/specs/`,
+`planning/plans/`, and the `planning/releases/` step from #33). Rewrite it to
+the portable Workflow text from `faststream-outbox`, with **one repo-specific
+addition: keep the release-notes step.** The new section covers:
+
+1. Per-feature pipeline: brainstorming → spec in
+   `planning/changes/active/YYYY-MM-DD.NN-<slug>/design.md` → writing-plans →
+   `plan.md` → executing-plans / subagent-driven-development →
+   requesting-code-review → finishing-a-development-branch.
+2. On merge: bundle moves to `planning/changes/archive/` with `status: shipped`,
+   `pr:`, `outcome:` filled, **and the change promotes its conclusions into the
+   affected `architecture/<capability>.md`** — name `architecture/` explicitly
+   as the promotion target.
+3. The spec/plan/architecture artifact-boundary paragraph.
+4. The three-lane paragraph.
+5. **Release notes** (preserved from #33): written when cutting a release (not
+   per-feature) — copy `planning/releases/TEMPLATE.md` to
+   `planning/releases/<version>.md` and link back to the driving change bundle.
+6. Pointers to `planning/README.md` and `planning/_templates/`.
+
+The `## Architecture` section's existing prose is untouched (it remains the
+source the four `architecture/` seed files are synthesized from; over time
+`architecture/` becomes the deep-dive and `CLAUDE.md` can point at it, but that
+trimming is out of scope here).
+
+### 8. `.gitignore` — remove the `plan.md` trap
+
+`.gitignore:22` ignores the literal filename `plan.md`. Under the new convention
+every bundle's plan is named `plan.md`, so this rule would silently exclude all
+of them from git (the old flat plans escaped only because they were named
+`YYYY-MM-DD-<slug>-plan.md`). Delete the line. `faststream-outbox` does not
+ignore it.
+
+### 9. `deferred.md`
+
+Create `planning/deferred.md` with the standard header (adapted from
+`faststream-outbox`), recording that there are **no deferred items today**. It
+is the long-tail register of real-but-unscheduled items with revisit triggers;
+items graduate from here into `changes/active/` bundles.
+
+### 10. Dogfood — this change is its own bundle
+
+This adoption lands as
+`planning/changes/active/2026-06-13.03-portable-planning-convention/`:
+
+- This `design.md` is written there now (during brainstorming) — the first use
+  of the new layout.
+- The implementation plan is written to `plan.md` in the same folder.
+- On merge, the bundle moves to `changes/archive/` with `status: shipped`,
+  `pr:`, `outcome:` filled, and its line moves to Archived in the README Index.
+  **No `architecture/` promotion applies** — this change defines the convention
+  (which lives in `README.md`) and seeds `architecture/`, rather than altering a
+  library capability.
+
+## Operations
+
+None. No DNS, infra, or external-account changes. Pure in-repo file moves, new
+files, and doc edits.
+
+## Testing
+
+No code touched, so correctness is verified by:
+
+- `just lint-ci` passes (eof-fixer --check, ruff format/check in check mode, ty
+  — the markdown/format gate, since no Python changes). If eof-fixer flags a new
+  markdown file missing a trailing newline, run `just lint` to autofix.
+- Repo-wide grep sweeps return zero stale **pointers** in `CLAUDE.md`,
+  `README.md`, and `justfile`:
+  - `grep -rn "planning/specs"` — none outside migrated archive prose.
+  - `grep -rn "planning/plans"` — none.
+- Every `planning/changes/**/design.md` and `plan.md` has parseable YAML
+  frontmatter (spot-checked on review).
+- `planning/README.md` Conventions section is byte-identical to
+  `faststream-outbox` (`diff` shows only the Index/Other and intro).
+- `planning/README.md` Index/Other links resolve (manual click-through).
+- The post-migration tree matches §2 exactly; `planning/specs/` and
+  `planning/plans/` are gone; `planning/releases/` is unchanged.
+
+No new pytest, no new CI job.
+
+## Risk
+
+- **`.NN` ordering for the two 2026-06-13 bundles.** *Mitigation:* PR numbers
+  (#32 before #33) give merge order; a wrong tiebreak is cosmetic (bundles sort
+  adjacently regardless).
+
+- **`architecture/` seed drifts from reality immediately.** Hand-written seed
+  prose can lag code the moment it lands. *Mitigation:* the seed is sourced from
+  `CLAUDE.md`, which is current; and the convention forces promotion on every
+  future change. An imperfect-but-real seed beats an empty truth home.
+
+- **Two copies of the architecture story** (`CLAUDE.md` `## Architecture` +
+  `architecture/`) can diverge until `CLAUDE.md` is trimmed to point at
+  `architecture/`. *Mitigation:* that trim is a deliberate follow-up, not this
+  change; until then `architecture/` is authoritative and `CLAUDE.md` is the
+  Claude-facing summary.
+
+- **Convention drift on the next change** (skipping lanes or the promotion).
+  *Mitigation:* `CLAUDE.md` names `architecture/` as the promotion target so PR
+  review catches a missing promotion the way it catches a missing test;
+  templates make the shape copy-pasteable.
+
+- **`git mv` blame continuity through the regroup.** *Mitigation:*
+  `git log --follow` and GitHub both follow renames; low practical impact for
+  planning artifacts.
