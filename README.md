@@ -89,10 +89,11 @@ A FastStream `BaseMiddleware` subclass. Add it to your broker to enable concurre
 
 The processing engine. Manages:
 - An `asyncio.Semaphore` to enforce `concurrency_limit`
-- In-flight task tracking via a counter + `asyncio.Event` (each task's done-callback releases the semaphore, decrements the counter, and sets the event when it reaches zero)
+- In-flight task tracking via a `set[asyncio.Task]`; each task's done-callback releases the semaphore, removes the task from the set, and logs any non-cancellation exception
 - A `KafkaBatchCommitter` for offset commits
-- Signal handlers for graceful shutdown
 - An optional `ConsumerRebalanceListener` (via `handler.create_rebalance_listener()`) that flushes pending commits when partitions are revoked
+
+This library does **not** install signal handlers — shutdown is driven by your lifespan / process manager calling `stop_concurrent_processing`.
 
 ### KafkaBatchCommitter
 
@@ -111,6 +112,7 @@ Create and start the concurrent processing handler; store it in FastStream's con
 | `commit_batch_size` | `10` | Max messages per commit batch |
 | `commit_batch_timeout_sec` | `10.0` | Max seconds before flushing a batch |
 | `shutdown_timeout_sec` | `20.0` | Max seconds the batch committer waits for its background task to drain before forcing cancellation |
+| `max_uncommitted_tasks` | `10000` | Max tasks accepted but not yet committed before the consume path blocks (backpressure). `None` disables the bound. |
 
 Returns the `KafkaConcurrentHandler` instance.
 
@@ -148,7 +150,7 @@ modern_di_faststream.setup_di(app, container=container)    # registered after �
 
 3. **Offset committing**: Each dispatched task is paired with its Kafka offset and consumer reference and enqueued in `KafkaBatchCommitter`. Once the task completes, the committer groups offsets by partition and calls `consumer.commit(partitions_to_offsets)` with `offset + 1` (Kafka's "next offset to fetch" convention).
 
-4. **Rebalance handling**: When Kafka revokes a partition, the `ConsumerRebalanceListener` (returned by `handler.create_rebalance_listener()`) calls `committer.commit_all()` to flush pending offsets before the partition is reassigned. This prevents in-flight messages from being redelivered to the new owner.
+4. **Rebalance handling**: When Kafka revokes a partition, the `ConsumerRebalanceListener` (returned by `handler.create_rebalance_listener(flush_timeout_sec=...)`) calls `committer.commit_all()` to flush pending offsets before the partition is reassigned. The flush waits for in-flight handlers up to `flush_timeout_sec` (default 10 s) so a slow handler cannot stall the rebalance past `max.poll.interval.ms`; on timeout, the remaining in-flight messages are redelivered after reassignment (at-least-once). A future optimization may scope the wait to only the revoked partitions.
 
 5. **Shutdown**: `stop_concurrent_processing` cancels every in-flight asyncio task, then awaits `committer.close()`. The committer treats cancelled tasks as a hard offset boundary — cancelled-and-after offsets stay uncommitted and get redelivered on restart. Total wall-clock is sub-second in normal conditions and bounded by `shutdown_timeout_sec` only as a safety net for stuck network commits.
 
