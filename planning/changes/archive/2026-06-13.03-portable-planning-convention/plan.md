@@ -1,9 +1,9 @@
 ---
-status: approved
+status: shipped
 date: 2026-06-13
 slug: portable-planning-convention
 spec: portable-planning-convention
-pr: null
+pr: "34"
 ---
 
 # Portable planning convention — implementation plan

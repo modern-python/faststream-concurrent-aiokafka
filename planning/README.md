@@ -71,12 +71,13 @@ carry **no** frontmatter — living prose, dated by git.
 
 ### Active
 
-- **[portable-planning-convention](changes/active/2026-06-13.03-portable-planning-convention/design.md)**
-  (2026-06-13) — Adopt the portable two-axis convention: `architecture/` truth
-  home + `changes/` bundles, fresh Index. *This change.*
+_None._
 
 ### Archived (shipped)
 
+- **[portable-planning-convention](changes/archive/2026-06-13.03-portable-planning-convention/design.md)**
+  (#34, 2026-06-13) — Adopt the portable two-axis convention: `architecture/`
+  truth home + `changes/` bundles, fresh Index.
 - **[codify-release-notes](changes/archive/2026-06-13.02-codify-release-notes/design.md)**
   (#33, 2026-06-13) — Codify `planning/releases/` as a workflow step; add the
   release-notes template.
