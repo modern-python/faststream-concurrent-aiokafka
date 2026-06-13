@@ -1,3 +1,13 @@
+---
+status: shipped
+date: 2026-06-03
+slug: faststream-0.7-migration
+supersedes: null
+superseded_by: null
+pr: "28"
+outcome: "merged as #28 (plan removed post-execution; design-only bundle)"
+---
+
 # Design: FastStream 0.7 migration (two-PR split)
 
 **Date:** 2026-06-03
