@@ -1,8 +1,16 @@
 # faststream-concurrent-aiokafka
 
-[![Supported versions](https://img.shields.io/pypi/pyversions/faststream-concurrent-aiokafka.svg)](https://pypi.python.org/pypi/faststream-concurrent-aiokafka)
-[![downloads](https://img.shields.io/pypi/dm/faststream-concurrent-aiokafka.svg)](https://pypistats.org/packages/faststream-concurrent-aiokafka)
+[![PyPI version](https://img.shields.io/pypi/v/faststream-concurrent-aiokafka.svg)](https://pypi.org/project/faststream-concurrent-aiokafka/)
+[![Supported Python versions](https://img.shields.io/pypi/pyversions/faststream-concurrent-aiokafka.svg)](https://pypi.org/project/faststream-concurrent-aiokafka/)
+[![Downloads](https://img.shields.io/pypi/dm/faststream-concurrent-aiokafka.svg)](https://pypistats.org/packages/faststream-concurrent-aiokafka)
+[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](https://github.com/modern-python/faststream-concurrent-aiokafka/actions/workflows/ci.yml)
+[![CI](https://github.com/modern-python/faststream-concurrent-aiokafka/actions/workflows/ci.yml/badge.svg)](https://github.com/modern-python/faststream-concurrent-aiokafka/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/modern-python/faststream-concurrent-aiokafka.svg)](https://github.com/modern-python/faststream-concurrent-aiokafka/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/modern-python/faststream-concurrent-aiokafka)](https://github.com/modern-python/faststream-concurrent-aiokafka/stargazers)
+[![Context7](https://img.shields.io/badge/Context7-docs-blue)](https://context7.com/modern-python/faststream-concurrent-aiokafka)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![ty](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ty/main/assets/badge/v0.json)](https://github.com/astral-sh/ty)
 
 Concurrent message processing middleware for [FastStream](https://faststream.airt.ai/) with aiokafka.
 
@@ -18,11 +26,6 @@ By default FastStream processes Kafka messages sequentially — one message at a
 - Signal handling owned by your lifespan / process manager — this lib does not register SIGTERM/SIGINT handlers
 - Handler exceptions are logged but do not crash the consumer
 - Health check helper to probe handler status from a `ContextRepo`
-
-## 📦 [PyPi](https://pypi.org/project/faststream-concurrent-aiokafka)
-
-## 📝 [License](LICENSE)
-
 
 ## Installation
 
@@ -174,8 +177,11 @@ If your handlers do non-idempotent work that's expensive to repeat, ensure your 
 - Python >= 3.11
 - `faststream[kafka]`
 
+## 📦 [PyPI](https://pypi.org/project/faststream-concurrent-aiokafka)
+
+## 📝 [License](LICENSE)
+
 ## Part of `modern-python`
 
 Browse the full list of templates and libraries in
-[`modern-python`](https://github.com/modern-python) — see the org profile for the
-categorized index.
+[`modern-python`](https://github.com/modern-python) — see the org profile for the categorized index.
