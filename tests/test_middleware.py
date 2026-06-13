@@ -3,7 +3,7 @@ import asyncio
 import contextlib
 import logging
 import typing
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -434,6 +434,43 @@ async def test_middleware_start_stop_reinitialize(setup_broker: KafkaBroker) -> 
         assert second_handler.is_healthy
         assert second_handler is not first_handler
 
+        await stop_concurrent_processing(test_broker.context)
+
+
+async def test_middleware_batch_subscriber_rejected(setup_broker: KafkaBroker) -> None:
+    """A batch subscriber (self.msg is a tuple/list of records) is rejected with a clear error."""
+
+    @setup_broker.subscriber("batch-reject-topic", group_id="batch-reject-group")
+    async def handler(msg: typing.Any) -> None: ...
+
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        await initialize_concurrent_processing(
+            context=test_broker.context, commit_batch_size=10, commit_batch_timeout_sec=5
+        )
+
+        # Direct unit-test: construct the middleware, set self.msg to a batch, give it
+        # a context that returns the handler and a MANUAL-ack mock_msg for "message".
+        mock_msg: typing.Final = MagicMock()
+        mock_msg.committed = None  # MANUAL ack path
+        mock_msg.consumer._enable_auto_commit = False
+
+        original_get: typing.Final = test_broker.context.get
+
+        def mock_get(key: str, default: typing.Any = None) -> typing.Any:
+            if key == "message":
+                return mock_msg
+            return original_get(key, default)
+
+        test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
+        middleware = KafkaConcurrentProcessingMiddleware(MagicMock(), context=test_broker.context)
+        middleware.msg = ({"a": 1}, {"b": 2})
+        try:
+            with pytest.raises(RuntimeError, match="does not support batch subscribers"):
+                await middleware.consume_scope(AsyncMock(), mock_msg)
+        finally:
+            test_broker.context.get = original_get  # ty: ignore[invalid-assignment]
+
+        await asyncio.sleep(0)
         await stop_concurrent_processing(test_broker.context)
 
 

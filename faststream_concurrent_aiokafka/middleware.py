@@ -74,6 +74,13 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
         if kafka_message.committed is not None:
             return await call_next(msg)
 
+        if isinstance(self.msg, (list, tuple)):
+            err = (
+                "KafkaConcurrentProcessingMiddleware does not support batch subscribers (batch=True). "
+                "Use a non-batch subscriber, or remove the middleware from this subscriber."
+            )
+            raise RuntimeError(err)  # noqa: TRY004
+
         if not concurrent_processing:
             err = "Concurrent processing is not running. Call `initialize_concurrent_processing` on app startup."
             raise RuntimeError(err)
