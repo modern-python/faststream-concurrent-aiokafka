@@ -281,7 +281,7 @@ async def test_real_kafka_shutdown_cancels_in_flight_tasks(kafka_bootstrap_serve
         started.set()
         try:
             await asyncio.sleep(30)  # far longer than the test window
-            completed_phase1.append(msg["id"])
+            completed_phase1.append(msg["id"])  # pragma: no cover  # unreachable: always cancelled first
         except asyncio.CancelledError:
             cancelled_seen.append(True)
             raise
