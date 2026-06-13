@@ -84,6 +84,7 @@ class KafkaBatchCommitter:
         commit_batch_timeout_sec: float = consts.DEFAULT_COMMIT_BATCH_TIMEOUT_SEC,
         commit_batch_size: int = consts.DEFAULT_COMMIT_BATCH_SIZE,
         shutdown_timeout_sec: float = consts.DEFAULT_SHUTDOWN_TIMEOUT_SEC,
+        max_uncommitted_tasks: int | None = consts.DEFAULT_MAX_UNCOMMITTED_TASKS,
     ) -> None:
         self._messages_queue: asyncio.Queue[KafkaCommitTask] = asyncio.Queue()
         self._commit_task: asyncio.Task[typing.Any] | None = None
@@ -109,6 +110,17 @@ class KafkaBatchCommitter:
         # clear_cancellation_watermarks(partitions) resolve which consumer's watermark to
         # drop on rebalance without changing the listener's API.
         self._partition_owner: dict[TopicPartition, int] = {}
+
+        # Backpressure: count of tasks admitted via send_task but not yet finally
+        # committed/dropped (in _messages_queue + pending). When it reaches the
+        # ceiling, send_task blocks so the consume path stalls and the consumer stops
+        # fetching until commits catch up. None disables the bound.
+        self._max_uncommitted_tasks = max_uncommitted_tasks
+        self._uncommitted_count: int = 0
+        # Set whenever the count drops (a commit round) or the loop exits; wakes a
+        # send_task blocked at the ceiling so it re-checks.
+        self._uncommitted_drained = asyncio.Event()
+        self._uncommitted_drained.set()
 
     def _on_user_task_done(self, _task: asyncio.Future[typing.Any]) -> None:
         """Done-callback target for user tasks; wakes the streaming loop."""
@@ -142,6 +154,7 @@ class KafkaBatchCommitter:
             # Transient error — re-queue batch for retry on next cycle
             logger.exception("Error during commit to kafka, re-queuing batch")
             for task in tasks_batch:
+                self._uncommitted_count += 1
                 await self._messages_queue.put(task)
             return False
         else:
@@ -248,6 +261,8 @@ class KafkaBatchCommitter:
 
         for _ in flat:
             self._messages_queue.task_done()
+        self._uncommitted_count -= len(flat)
+        self._uncommitted_drained.set()
         return all(results)
 
     async def _run_commit_process(self) -> None:
@@ -266,6 +281,7 @@ class KafkaBatchCommitter:
                 await self._streaming_iteration(state)
         finally:
             state.cancel_outstanding()
+            self._uncommitted_drained.set()
 
     async def _streaming_iteration(self, state: "_StreamingState") -> None:
         wait_targets: list[asyncio.Future[typing.Any]] = [
@@ -395,6 +411,14 @@ class KafkaBatchCommitter:
 
     async def send_task(self, new_task: KafkaCommitTask) -> None:
         self._check_is_commit_task_running()
+        while self._max_uncommitted_tasks is not None and self._uncommitted_count >= self._max_uncommitted_tasks:
+            self._uncommitted_drained.clear()
+            # Re-check liveness before parking: if the loop died we must raise, not hang.
+            self._check_is_commit_task_running()
+            # Signal the committer loop to flush now so it can drain the count and unblock us.
+            self._flush_batch_event.set()
+            await self._uncommitted_drained.wait()
+        self._uncommitted_count += 1
         await self._messages_queue.put(new_task)
 
     def spawn(self) -> None:
