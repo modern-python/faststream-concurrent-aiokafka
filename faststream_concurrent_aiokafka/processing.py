@@ -89,13 +89,17 @@ class KafkaConcurrentHandler:
 
         logger.info("Kafka middleware. Complete shutting down middleware handler")
 
-    def create_rebalance_listener(self) -> ConsumerRebalanceListener:
+    def create_rebalance_listener(
+        self, flush_timeout_sec: float = consts.DEFAULT_REBALANCE_FLUSH_TIMEOUT_SEC
+    ) -> ConsumerRebalanceListener:
         """Return a ConsumerRebalanceListener that flushes pending commits on partition revocation.
 
-        Pass the returned listener to ``@broker.subscriber(..., listener=listener)`` so that
-        in-flight offsets are committed before Kafka hands the partition to another consumer.
+        ``flush_timeout_sec`` bounds how long the revoke callback waits for in-flight
+        handlers to finish before returning (keeps a slow handler from stalling the
+        rebalance past max.poll.interval.ms). Pass the returned listener to
+        ``@broker.subscriber(..., listener=listener)``.
         """
-        return ConsumerRebalanceListener(self._committer)
+        return ConsumerRebalanceListener(self._committer, flush_timeout_sec)
 
     @property
     def is_healthy(self) -> bool:

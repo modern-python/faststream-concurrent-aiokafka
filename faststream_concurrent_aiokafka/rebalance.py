@@ -2,6 +2,7 @@ import typing
 
 from aiokafka import ConsumerRebalanceListener as BaseConsumerRebalanceListener
 
+from faststream_concurrent_aiokafka import consts
 from faststream_concurrent_aiokafka.batch_committer import KafkaBatchCommitter
 
 
@@ -32,14 +33,19 @@ class ConsumerRebalanceListener(BaseConsumerRebalanceListener):
 
     """
 
-    def __init__(self, committer: KafkaBatchCommitter) -> None:
+    def __init__(
+        self,
+        committer: KafkaBatchCommitter,
+        flush_timeout_sec: float = consts.DEFAULT_REBALANCE_FLUSH_TIMEOUT_SEC,
+    ) -> None:
         self._committer = committer
+        self._flush_timeout_sec = flush_timeout_sec
 
     async def on_partitions_assigned(self, _assigned: object) -> None:  # ty: ignore[invalid-method-override]
         pass
 
     async def on_partitions_revoked(self, revoked: object) -> None:
-        await self._committer.commit_all()
+        await self._committer.commit_all(self._flush_timeout_sec)
         # The revoked partitions' next assignment (possibly to another consumer) starts
         # fresh, so the cancellation floor — if any was set — must not carry over.
         self._committer.clear_cancellation_watermarks(typing.cast("typing.Iterable[TopicPartition]", revoked))

@@ -358,14 +358,23 @@ class KafkaBatchCommitter:
             await self._commit_partitions(ready)
         return ready
 
-    async def commit_all(self) -> None:
-        """Flush and commit all pending tasks without stopping the committer loop.
+    async def commit_all(self, flush_timeout_sec: float = consts.DEFAULT_REBALANCE_FLUSH_TIMEOUT_SEC) -> None:
+        """Flush and commit pending tasks without stopping the committer loop.
 
-        Safe to call during Kafka rebalance (on_partitions_revoked). The committer
-        continues running after this returns.
+        Bounded by ``flush_timeout_sec``: on timeout, already-completed offsets are
+        committed and any still-in-flight tasks stay uncommitted (redelivered after
+        reassignment — at-least-once). Safe to call during rebalance
+        (on_partitions_revoked); the committer keeps running after this returns.
         """
         self._flush_batch_event.set()
-        await self._messages_queue.join()
+        try:
+            await asyncio.wait_for(self._messages_queue.join(), timeout=flush_timeout_sec)
+        except TimeoutError:
+            logger.warning(
+                "Kafka middleware. commit_all flush timed out after %.1fs; "
+                "in-flight offsets will be redelivered on restart/reassignment",
+                flush_timeout_sec,
+            )
 
     def clear_cancellation_watermarks(self, partitions: typing.Iterable[TopicPartition] | None = None) -> None:
         """Forget cancellation watermarks for ``partitions`` (or all if ``None``).

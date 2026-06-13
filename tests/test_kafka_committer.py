@@ -1123,6 +1123,41 @@ async def test_committer_streaming_drains_on_close() -> None:
     consumer.commit.assert_called_once_with({tp: 105})
 
 
+async def test_commit_all_times_out_on_hung_handler(caplog: pytest.LogCaptureFixture) -> None:
+    """commit_all returns within flush_timeout_sec even if an in-flight task never completes."""
+    caplog.set_level(logging.WARNING)
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    committer.spawn()
+
+    async def hangs() -> None:
+        await asyncio.sleep(30)
+
+    hung_task: typing.Final = asyncio.create_task(hangs())
+    await committer.send_task(
+        KafkaCommitTask(
+            asyncio_task=hung_task,
+            offset=1,
+            consumer=consumer,
+            topic_partition=TopicPartition(topic="t", partition=0),
+        )
+    )
+
+    loop: typing.Final = asyncio.get_running_loop()
+    started: typing.Final = loop.time()
+    await committer.commit_all(flush_timeout_sec=0.1)
+    elapsed: typing.Final = loop.time() - started
+
+    assert elapsed < 1.0, f"commit_all blocked on the hung task ({elapsed:.2f}s)"
+    assert "flush timed out" in caplog.text
+    assert committer.is_healthy  # loop still running after a timed-out flush
+
+    hung_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await hung_task
+    await committer.close()
+
+
 async def test_committer_streaming_handles_requeue_offset_order() -> None:
     """Lazy offset sort tolerates re-queued tasks landing after higher-offset arrivals.
 
