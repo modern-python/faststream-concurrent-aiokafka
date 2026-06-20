@@ -71,7 +71,7 @@ All commands assume CWD `/Users/kevinsmith/src/pypi/faststream-concurrent-aiokaf
 - [ ] **Step 2: Create the directory skeleton**
 
   ```bash
-  mkdir -p planning/changes/active planning/changes/archive planning/audits planning/retros planning/_templates
+  mkdir -p planning/changes/active planning/audits planning/retros planning/_templates
   touch planning/changes/active/.gitkeep planning/audits/.gitkeep planning/retros/.gitkeep
   ```
 
@@ -233,9 +233,9 @@ change history. Aim for ~2–5 KB each, matching the granularity of
 
 ---
 
-### Task 3: Migrate the four change bundles into `changes/archive/`
+### Task 3: Migrate the four change bundles into `changes/`
 
-**Files:** four bundle folders under `planning/changes/archive/`; `git mv` each
+**Files:** four bundle folders under `planning/changes/`; `git mv` each
 design (+ plan where present); prepend YAML frontmatter; fix the two plan `Spec`
 links.
 
@@ -243,23 +243,23 @@ links.
 
   ```bash
   # 2026-06-03.01 faststream-0.7-migration (design-only)
-  mkdir -p planning/changes/archive/2026-06-03.01-faststream-0.7-migration
-  git mv planning/specs/2026-06-03-faststream-0.7-migration-design.md planning/changes/archive/2026-06-03.01-faststream-0.7-migration/design.md
+  mkdir -p planning/changes/2026-06-03.01-faststream-0.7-migration
+  git mv planning/specs/2026-06-03-faststream-0.7-migration-design.md planning/changes/2026-06-03.01-faststream-0.7-migration/design.md
 
   # 2026-06-04.01 faststream-0.7.1-testbroker-typing
-  mkdir -p planning/changes/archive/2026-06-04.01-faststream-0.7.1-testbroker-typing
-  git mv planning/specs/2026-06-04-faststream-0.7.1-testbroker-typing-design.md planning/changes/archive/2026-06-04.01-faststream-0.7.1-testbroker-typing/design.md
-  git mv planning/plans/2026-06-04-faststream-0.7.1-testbroker-typing-plan.md   planning/changes/archive/2026-06-04.01-faststream-0.7.1-testbroker-typing/plan.md
+  mkdir -p planning/changes/2026-06-04.01-faststream-0.7.1-testbroker-typing
+  git mv planning/specs/2026-06-04-faststream-0.7.1-testbroker-typing-design.md planning/changes/2026-06-04.01-faststream-0.7.1-testbroker-typing/design.md
+  git mv planning/plans/2026-06-04-faststream-0.7.1-testbroker-typing-plan.md   planning/changes/2026-06-04.01-faststream-0.7.1-testbroker-typing/plan.md
 
   # 2026-06-13.01 robustness-docs-test-audit
-  mkdir -p planning/changes/archive/2026-06-13.01-robustness-docs-test-audit
-  git mv planning/specs/2026-06-13-robustness-docs-test-audit-design.md planning/changes/archive/2026-06-13.01-robustness-docs-test-audit/design.md
-  git mv planning/plans/2026-06-13-robustness-docs-test-audit-plan.md    planning/changes/archive/2026-06-13.01-robustness-docs-test-audit/plan.md
+  mkdir -p planning/changes/2026-06-13.01-robustness-docs-test-audit
+  git mv planning/specs/2026-06-13-robustness-docs-test-audit-design.md planning/changes/2026-06-13.01-robustness-docs-test-audit/design.md
+  git mv planning/plans/2026-06-13-robustness-docs-test-audit-plan.md    planning/changes/2026-06-13.01-robustness-docs-test-audit/plan.md
 
   # 2026-06-13.02 codify-release-notes
-  mkdir -p planning/changes/archive/2026-06-13.02-codify-release-notes
-  git mv planning/specs/2026-06-13-codify-release-notes-design.md planning/changes/archive/2026-06-13.02-codify-release-notes/design.md
-  git mv planning/plans/2026-06-13-codify-release-notes-plan.md   planning/changes/archive/2026-06-13.02-codify-release-notes/plan.md
+  mkdir -p planning/changes/2026-06-13.02-codify-release-notes
+  git mv planning/specs/2026-06-13-codify-release-notes-design.md planning/changes/2026-06-13.02-codify-release-notes/design.md
+  git mv planning/plans/2026-06-13-codify-release-notes-plan.md   planning/changes/2026-06-13.02-codify-release-notes/plan.md
   ```
 
 - [ ] **Step 2: Prepend frontmatter to each `design.md`**
@@ -384,7 +384,7 @@ links.
 - [ ] **Step 5: Verify frontmatter parses on all bundle design/plan files**
 
   ```bash
-  for f in planning/changes/archive/*/design.md planning/changes/archive/*/plan.md; do
+  for f in planning/changes/*/design.md planning/changes/*/plan.md; do
     uv run python -c "import sys,yaml; t=open('$f').read(); assert t.startswith('---'),'$f'; yaml.safe_load(t.split('---')[1]); print('OK','$f')"
   done
   ```
@@ -425,7 +425,7 @@ links.
   ```
   with:
   ```
-  Audit spec: [`planning/changes/archive/2026-06-13.01-robustness-docs-test-audit/design.md`](../changes/archive/2026-06-13.01-robustness-docs-test-audit/design.md).
+  Audit spec: [`planning/changes/2026-06-13.01-robustness-docs-test-audit/design.md`](../changes/2026-06-13.01-robustness-docs-test-audit/design.md).
   ```
 
 - [ ] **Step 3: Repoint the `TEMPLATE.md` spec-link placeholder**
@@ -436,7 +436,7 @@ links.
   ```
   with:
   ```
-  Spec: [`planning/changes/archive/<YYYY-MM-DD.NN-slug>/design.md`](../changes/archive/<YYYY-MM-DD.NN-slug>/design.md).
+  Spec: [`planning/changes/<YYYY-MM-DD.NN-slug>/design.md`](../changes/<YYYY-MM-DD.NN-slug>/design.md).
   ```
 
 - [ ] **Step 4: Verify no live link points at the old paths**
@@ -497,16 +497,16 @@ links.
 
   ### Archived (shipped)
 
-  - **[codify-release-notes](changes/archive/2026-06-13.02-codify-release-notes/design.md)**
+  - **[codify-release-notes](changes/2026-06-13.02-codify-release-notes/design.md)**
     (#33, 2026-06-13) — Codify `planning/releases/` as a workflow step; add the
     release-notes template.
-  - **[robustness-docs-test-audit](changes/archive/2026-06-13.01-robustness-docs-test-audit/design.md)**
+  - **[robustness-docs-test-audit](changes/2026-06-13.01-robustness-docs-test-audit/design.md)**
     (#32, 2026-06-13) — Rebalance-flush timeout, batch-subscriber guard,
     uncommitted-task backpressure, plus docs/test/refactor. Shipped in 0.6.0.
-  - **[faststream-0.7.1-testbroker-typing](changes/archive/2026-06-04.01-faststream-0.7.1-testbroker-typing/design.md)**
+  - **[faststream-0.7.1-testbroker-typing](changes/2026-06-04.01-faststream-0.7.1-testbroker-typing/design.md)**
     (#29, 2026-06-04) — Adopt FastStream 0.7.1's `TestBroker` typing fix; drop
     `# ty: ignore` directives.
-  - **[faststream-0.7-migration](changes/archive/2026-06-03.01-faststream-0.7-migration/design.md)**
+  - **[faststream-0.7-migration](changes/2026-06-03.01-faststream-0.7-migration/design.md)**
     (#28, 2026-06-03) — Migrate to `faststream>=0.7` (drop 0.6 support).
     Design-only bundle (execution plan removed post-merge).
 
@@ -570,7 +570,7 @@ links.
   ```markdown
   ## Workflow
 
-  Per-feature: brainstorming → spec in `planning/changes/active/YYYY-MM-DD.NN-<slug>/design.md` → writing-plans → plan in `planning/changes/active/YYYY-MM-DD.NN-<slug>/plan.md` → executing-plans / subagent-driven-development → requesting-code-review → finishing-a-development-branch. Each change is a folder bundle; `<slug>` is a kebab-case description, not a story ID; `.NN` is a zero-padded intra-day counter that breaks same-date ties so the timeline sorts stably. On merge, the bundle moves to `planning/changes/archive/` with `status: shipped`, `pr:`, and `outcome:` filled, **and the change promotes its conclusions into the affected `architecture/<capability>.md`** — that hand-edit is what keeps `architecture/` true. See [`planning/README.md`](planning/README.md) for the conventions + index and [`planning/_templates/`](planning/_templates/) for copy-and-fill starting points.
+  Per-feature: brainstorming → spec in `planning/changes/active/YYYY-MM-DD.NN-<slug>/design.md` → writing-plans → plan in `planning/changes/active/YYYY-MM-DD.NN-<slug>/plan.md` → executing-plans / subagent-driven-development → requesting-code-review → finishing-a-development-branch. Each change is a folder bundle; `<slug>` is a kebab-case description, not a story ID; `.NN` is a zero-padded intra-day counter that breaks same-date ties so the timeline sorts stably. On merge, the bundle moves to `planning/changes/` with `status: shipped`, `pr:`, and `outcome:` filled, **and the change promotes its conclusions into the affected `architecture/<capability>.md`** — that hand-edit is what keeps `architecture/` true. See [`planning/README.md`](planning/README.md) for the conventions + index and [`planning/_templates/`](planning/_templates/) for copy-and-fill starting points.
 
   **Spec** (`design.md`) captures the *thinking* — why, what the design is, trade-offs, scope. Written before code; rarely revised after merge. **Plan** (`plan.md`) captures the *sequencing* — the ordered checklist an executor walks; references the spec for the "why". **`architecture/`** captures the *invariants* of shipped systems — the living truth, promoted from a change on merge. A plan paragraph that would still read correctly with all task numbers and checkboxes removed is design content and belongs in the spec.
 
@@ -621,7 +621,7 @@ links.
     && echo "STALE POINTER (review)" || echo "no stale pointers in CLAUDE.md/README/justfile"
   ```
   Expected: `no stale pointers in CLAUDE.md/README/justfile`. (Mentions inside
-  migrated archive prose under `planning/changes/archive/` are historical and
+  migrated archive prose under `planning/changes/` are historical and
   acceptable.)
 
 - [ ] **Step 3: Final tree check**
@@ -633,7 +633,7 @@ links.
   `README.md`, `_templates/`, `audits/`, `changes/{active,archive}`, `deferred.md`,
   `releases/`, `retros/`; **no** `specs/`, `plans/`, or `templates/`.
   `changes/active/` holds only this convention bundle (+ `.gitkeep`);
-  `changes/archive/` holds the four migrated bundles.
+  `changes/` holds the four migrated bundles.
 
 - [ ] **Step 4: Frontmatter parse sweep across every bundle file**
 
@@ -665,7 +665,7 @@ This convention bundle self-migrates (it defines the convention, so **no
 
   ```bash
   git mv planning/changes/active/2026-06-13.03-portable-planning-convention \
-         planning/changes/archive/2026-06-13.03-portable-planning-convention
+         planning/changes/2026-06-13.03-portable-planning-convention
   ```
   Then in both `design.md` and `plan.md` of the moved bundle set `status:
   shipped` and `pr: "<this PR number>"`; in `design.md` also set `outcome:
@@ -675,7 +675,7 @@ This convention bundle self-migrates (it defines the convention, so **no
 
   In `planning/README.md`, move the `portable-planning-convention` entry from
   `### Active` to the top of `### Archived (shipped)`, change its path from
-  `changes/active/...` to `changes/archive/...`, add the PR number, and drop the
+  `changes/active/...` to `changes/...`, add the PR number, and drop the
   *This change.* suffix. Leave `### Active` as `_None._`.
 
 - [ ] **Step 3: Verify and commit**

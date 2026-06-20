@@ -2,6 +2,7 @@
 status: shipped
 date: 2026-06-13
 slug: portable-planning-convention
+summary: Adopt the portable two-axis convention: `architecture/` truth home + `changes/` bundles, fresh Index.
 supersedes: null
 superseded_by: null
 pr: "34"
@@ -26,7 +27,7 @@ The convention prose (`planning/README.md` "Conventions" section) and the three
 templates (`_templates/{design,plan,change}.md`) are copied **byte-identical**
 from `faststream-outbox`; only the repo-specific "Index" is authored fresh. The
 existing `planning/` artifacts are migrated into the new shape: each
-design(+plan) becomes a bundle under `changes/archive/`, and `planning/specs/`
+design(+plan) becomes a bundle under `changes/`, and `planning/specs/`
 and `planning/plans/` are removed.
 
 Because this repo has **no `architecture/` today**, the migration also seeds it
@@ -189,7 +190,7 @@ via normal changes.
 ### 4. Migration mapping
 
 Each existing design (and its plan, where one exists) becomes a bundle under
-`changes/archive/`. `.NN` is assigned by merge order per date. `git mv`
+`changes/`. `.NN` is assigned by merge order per date. `git mv`
 throughout to preserve blame.
 
 | Bundle | design.md ← | plan.md ← | PR |
@@ -250,7 +251,7 @@ addition: keep the release-notes step.** The new section covers:
    `planning/changes/active/YYYY-MM-DD.NN-<slug>/design.md` → writing-plans →
    `plan.md` → executing-plans / subagent-driven-development →
    requesting-code-review → finishing-a-development-branch.
-2. On merge: bundle moves to `planning/changes/archive/` with `status: shipped`,
+2. On merge: bundle moves to `planning/changes/` with `status: shipped`,
    `pr:`, `outcome:` filled, **and the change promotes its conclusions into the
    affected `architecture/<capability>.md`** — name `architecture/` explicitly
    as the promotion target.
@@ -289,7 +290,7 @@ This adoption lands as
 - This `design.md` is written there now (during brainstorming) — the first use
   of the new layout.
 - The implementation plan is written to `plan.md` in the same folder.
-- On merge, the bundle moves to `changes/archive/` with `status: shipped`,
+- On merge, the bundle moves to `changes/` with `status: shipped`,
   `pr:`, `outcome:` filled, and its line moves to Archived in the README Index.
   **No `architecture/` promotion applies** — this change defines the convention
   (which lives in `README.md`) and seeds `architecture/`, rather than altering a
