@@ -2,6 +2,7 @@
 status: shipped
 date: 2026-06-03
 slug: faststream-0.7-migration
+summary: Migrate to `faststream>=0.7` (drop 0.6 support). Design-only bundle (execution plan removed post-merge).
 supersedes: null
 superseded_by: null
 pr: "28"

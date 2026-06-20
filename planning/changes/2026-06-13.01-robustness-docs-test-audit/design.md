@@ -2,6 +2,7 @@
 status: shipped
 date: 2026-06-13
 slug: robustness-docs-test-audit
+summary: Rebalance-flush timeout, batch-subscriber guard, uncommitted-task backpressure, plus docs/test/refactor. Shipped in 0.6.0.
 supersedes: null
 superseded_by: null
 pr: "32"
