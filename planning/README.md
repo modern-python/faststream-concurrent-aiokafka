@@ -8,33 +8,35 @@ living truth about *what the system does now* lives in
 ## Conventions
 
 > This section is the portable convention — identical across the
-> modern-python repos. The Index below is repo-specific. To adopt elsewhere,
+> modern-python repos. The generated change listing (`just index`) and the `## Other` pointers below are repo-local. To adopt elsewhere,
 > copy this section plus [`_templates/`](_templates/) and point that repo's
 > `CLAUDE.md` Workflow + truth home at it.
 
 ### Two axes, never mixed
 
 - **`architecture/` (repo root) — the present.** One file per capability,
-  living prose, updated whenever a change ships. The truth home.
+  living prose, updated in the same PR that ships the change. The truth home.
 - **`planning/changes/` — the past-and-pending.** One folder per change,
-  frozen once shipped.
+  kept in place after ship.
 
-Shipping a change **promotes** its conclusions into the affected
-`architecture/<capability>.md` by hand, then archives the bundle. That
-hand-edit is what keeps `architecture/` true; the archived bundle carries the
-*why*.
+A change **promotes** its conclusions into the affected
+`architecture/<capability>.md` by hand **in the implementing PR, alongside the
+code** — the edit rides in the same diff and is reviewed with it, never applied
+as a separate post-merge step. That hand-edit is what keeps `architecture/`
+true; the bundle stays in `changes/` as the *why*.
 
 ### Change bundles
 
-A change is a folder `changes/active/YYYY-MM-DD.NN-<slug>/`:
+A change is a folder `changes/YYYY-MM-DD.NN-<slug>/`:
 
 - `YYYY-MM-DD` — proposal date; `.NN` — zero-padded intra-day counter
   (`.01`, `.02`, …) that breaks same-date ties so the timeline sorts stably.
 - `<slug>` — kebab-case description, not a story ID.
 
-On merge the folder moves to `changes/archive/` with `status: shipped`, `pr:`,
-and `outcome:` filled, and its line moves from **Active** to **Archived** in
-the Index below.
+`summary` is written when the change is created (it is the change's
+one-liner). The implementing PR then sets `status: shipped` and fills `pr`
+and `outcome` **in the branch**, alongside the code and the `architecture/`
+promotion — no post-merge bookkeeping, no folder move.
 
 ### Three lanes
 
@@ -63,33 +65,16 @@ Templates live in [`_templates/`](_templates/).
 ### Frontmatter
 
 `design.md` / `change.md`: `status` (draft|approved|shipped|superseded),
-`date`, `slug`, `supersedes`, `superseded_by`, `pr`, `outcome`.
-`plan.md`: `status`, `date`, `slug`, `spec`, `pr`. Files in `architecture/`
-carry **no** frontmatter — living prose, dated by git.
+`date`, `slug`, `summary` (single line), `supersedes`, `superseded_by`, `pr`,
+`outcome`. `plan.md`: `status`, `date`, `slug`, `spec`, `pr`. Files in
+`architecture/` carry **no** frontmatter — living prose, dated by git.
 
 ## Index
 
-### Active
-
-_None._
-
-### Archived (shipped)
-
-- **[portable-planning-convention](changes/archive/2026-06-13.03-portable-planning-convention/design.md)**
-  (#34, 2026-06-13) — Adopt the portable two-axis convention: `architecture/`
-  truth home + `changes/` bundles, fresh Index.
-- **[codify-release-notes](changes/archive/2026-06-13.02-codify-release-notes/design.md)**
-  (#33, 2026-06-13) — Codify `planning/releases/` as a workflow step; add the
-  release-notes template.
-- **[robustness-docs-test-audit](changes/archive/2026-06-13.01-robustness-docs-test-audit/design.md)**
-  (#32, 2026-06-13) — Rebalance-flush timeout, batch-subscriber guard,
-  uncommitted-task backpressure, plus docs/test/refactor. Shipped in 0.6.0.
-- **[faststream-0.7.1-testbroker-typing](changes/archive/2026-06-04.01-faststream-0.7.1-testbroker-typing/design.md)**
-  (#29, 2026-06-04) — Adopt FastStream 0.7.1's `TestBroker` typing fix; drop
-  `# ty: ignore` directives.
-- **[faststream-0.7-migration](changes/archive/2026-06-03.01-faststream-0.7-migration/design.md)**
-  (#28, 2026-06-03) — Migrate to `faststream>=0.7` (drop 0.6 support).
-  Design-only bundle (execution plan removed post-merge).
+The change listing is **generated**, not maintained — run `just index` to
+print it (grouped by `status`: In progress / Shipped / Superseded). The
+frontmatter in each bundle is the single source of truth; there is no
+committed copy to drift.
 
 ## Other
 
