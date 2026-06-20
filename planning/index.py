@@ -1,4 +1,4 @@
-# ruff: noqa: INP001  # planning/ is not a Python package; this is a standalone script
+# ruff: noqa: INP001, D212  # planning/ is not a Python package; D212/D213 conflict differs from faststream-outbox
 """
 Generate the planning change index from bundle frontmatter.
 
