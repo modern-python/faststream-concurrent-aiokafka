@@ -12,7 +12,7 @@ a worked example.
 whether there are breaking API changes, and call out any defaults that
 changed behavior — point readers at Upgrade notes.>
 
-Spec: [`planning/changes/archive/<YYYY-MM-DD.NN-slug>/design.md`](../changes/archive/<YYYY-MM-DD.NN-slug>/design.md).
+Spec: [`planning/changes/<YYYY-MM-DD.NN-slug>/design.md`](../changes/<YYYY-MM-DD.NN-slug>/design.md).
 
 ## 1. <Behavioral change title> (`<new_param_or_symbol>`)
 
