@@ -1,6 +1,6 @@
 [project]
 name = "faststream-concurrent-aiokafka"
-description = "Concurrent message processing middleware for FastStream with aiokafka"
+description = "Concurrent message-processing middleware for FastStream + aiokafka"
 authors = [
     { name = "Artur Shiriev", email = "me@shiriev.ru" },
 ]
@@ -8,14 +8,19 @@ readme = "README.md"
 requires-python = ">=3.11,<4"
 license = "MIT"
 keywords = [
-    "python",
-    "kafka",
     "faststream",
+    "kafka",
     "aiokafka",
-    "concurrent",
+    "concurrency",
     "middleware",
+    "messaging",
+    "asyncio",
+    "python",
 ]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -29,7 +34,10 @@ dependencies = [
 ]
 
 [project.urls]
-repository = "https://github.com/modern-python/faststream-concurrent-aiokafka"
+Homepage = "https://modern-python.org"
+Repository = "https://github.com/modern-python/faststream-concurrent-aiokafka"
+Issues = "https://github.com/modern-python/faststream-concurrent-aiokafka/issues"
+Changelog = "https://github.com/modern-python/faststream-concurrent-aiokafka/releases"
 
 [dependency-groups]
 dev = [
