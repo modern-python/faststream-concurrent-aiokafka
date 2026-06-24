@@ -6,7 +6,7 @@ summary: Extract consume_scope's 8-branch message classification into a pure _cl
 supersedes: null
 superseded_by: null
 pr: "41"
-outcome: "PR #41 opened; merge pending CI's full Redpanda gate (Docker outage blocked the local run). middleware.py at 100% coverage from the non-Docker middleware suite (29 passed); behaviour-preserving."
+outcome: "Merged as #41 (squash 596b2d7). Full suite green on real Redpanda in CI across Python 3.11–3.14; middleware.py at 100% coverage. PR review added an assert_never exhaustiveness guard + test hardenings, no correctness findings."
 ---
 
 # Change: Lift the route decision out of `consume_scope`
