@@ -11,10 +11,6 @@ from faststream_concurrent_aiokafka import _pending_state, consts
 from faststream_concurrent_aiokafka._pending_state import KafkaCommitTask
 
 
-if typing.TYPE_CHECKING:
-    from aiokafka import AIOKafkaConsumer
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -26,7 +22,6 @@ class _StreamingState:
     """Mutable state for the streaming committer loop.
 
     Invariants maintained by `_streaming_iteration`:
-      * `pending_count == sum(len(v) for v in pending.values())`.
       * `pending` empty ⇒ `timeout_deadline is None`.
       * `flush_in_progress` is set only when a flush event fired *without*
         `_stop_requested`; cleared once `pending` drains.
@@ -41,10 +36,6 @@ class _StreamingState:
     # Absolute loop-time deadline for the next commit_batch_timeout firing. None when pending
     # is empty (no timer needed). Passed as `timeout=` to asyncio.wait — no Task allocation.
     timeout_deadline: float | None = None
-    pending: dict[TopicPartition, list[KafkaCommitTask]] = dataclasses.field(default_factory=dict)
-    # Cached count of all tasks in `pending` across partitions; kept in sync with
-    # _insert_sorted callers and post-extract. Lets _maybe_commit avoid an O(P) sum every loop.
-    pending_count: int = 0
     should_shutdown: bool = False
     # Active commit_all (flush event seen, _stop_requested is False): keep committing every
     # iteration until pending drains, so messages_queue.join() can return.
@@ -54,10 +45,6 @@ class _StreamingState:
         for task in (self.queue_get_task, self.flush_wait_task, self.task_completed_wait_task):
             if not task.done():
                 task.cancel()
-
-
-def _insert_sorted(partition_pending: list[KafkaCommitTask], new_ct: KafkaCommitTask) -> None:
-    _pending_state.insert_sorted(partition_pending, new_ct)
 
 
 class KafkaBatchCommitter:
@@ -80,18 +67,8 @@ class KafkaBatchCommitter:
         self._commit_batch_timeout_sec = commit_batch_timeout_sec
         self._commit_batch_size = commit_batch_size
         self._shutdown_timeout = shutdown_timeout_sec
-        # Per-(consumer, partition) floor for the smallest cancelled offset seen since the
-        # partition was last assigned to that consumer. Scoping by id(consumer) prevents a
-        # cancelled task on one consumer group from blocking commits on another group that
-        # happens to subscribe to the same (topic, partition). Once set, the committer will
-        # not advance Kafka's committed offset for that consumer/partition until
-        # clear_cancellation_watermarks() is called on rebalance — so the cancelled-and-after
-        # offsets get redelivered on restart (at-least-once).
-        self._cancellation_watermarks: dict[tuple[int, TopicPartition], int] = {}
-        # Most-recent consumer (by id()) that absorbed a task for each partition. Lets
-        # clear_cancellation_watermarks(partitions) resolve which consumer's watermark to
-        # drop on rebalance without changing the listener's API.
-        self._partition_owner: dict[TopicPartition, int] = {}
+        # Owns per-partition pending commit tasks, count, and cancellation watermarks.
+        self._pending: typing.Final = _pending_state.PendingCommits()
 
         # Backpressure: count of tasks admitted via send_task but not yet finally
         # committed/dropped (in _messages_queue + pending). When it reaches the
@@ -120,14 +97,11 @@ class KafkaBatchCommitter:
             msg: typing.Final = "Committer main task is not running"
             raise CommitterIsDeadError(msg)
 
-    async def _call_committer(
-        self, tasks_batch: list[KafkaCommitTask], partitions_to_offsets: dict[TopicPartition, int]
-    ) -> bool:
-        if not partitions_to_offsets:
+    async def _call_committer(self, rc: _pending_state.ReadyCommit) -> bool:
+        if not rc.offsets:
             return True
-        consumer: typing.Final[AIOKafkaConsumer] = tasks_batch[0].consumer
         try:
-            await consumer.commit(partitions_to_offsets)
+            await rc.consumer.commit(rc.offsets)
         except (CommitFailedError, IllegalStateError):
             # Partition no longer assigned (rebalance/revocation) — discard batch, not retryable
             logger.exception("Cannot commit due to partition loss or rebalancing, ignoring batch")
@@ -135,53 +109,24 @@ class KafkaBatchCommitter:
         except KafkaError:
             # Transient error — re-queue batch for retry on next cycle
             logger.exception("Error during commit to kafka, re-queuing batch")
-            for task in tasks_batch:
+            for task in rc.tasks:
                 self._uncommitted_count += 1
                 await self._messages_queue.put(task)
             return False
         else:
             return True
 
-    @staticmethod
-    def _map_offsets_per_partition(
-        consumer_id: int,
-        consumer_tasks: list[KafkaCommitTask],
-        watermarks: dict[tuple[int, TopicPartition], int],
-    ) -> dict[TopicPartition, int]:
-        return _pending_state.map_offsets_per_partition(consumer_id, consumer_tasks, watermarks)
-
-    @staticmethod
-    def _extract_ready_prefixes(
-        pending: dict[TopicPartition, list[KafkaCommitTask]],
-    ) -> tuple[dict[TopicPartition, list[KafkaCommitTask]], int]:
-        return _pending_state.extract_ready_prefixes(pending)
-
-    async def _commit_partitions(self, ready: dict[TopicPartition, list[KafkaCommitTask]]) -> bool:
-        # Task exception logging is handled by the handler's _finish_task done-callback so
-        # it fires once per task at completion time. We intentionally do NOT log here:
-        # transient KafkaError re-queues a task, and a per-commit log would emit duplicates.
-        flat: typing.Final[list[KafkaCommitTask]] = [t for tasks in ready.values() for t in tasks]
-
-        # Group by consumer instance — each AIOKafkaConsumer can only commit its own partitions.
-        # With more than one consumer (router with multiple subscribers sharing the handler),
-        # each commit is an independent network round-trip and can run concurrently.
-        consumers_tasks: dict[int, list[KafkaCommitTask]] = {}
-        for task in flat:
-            consumers_tasks.setdefault(id(task.consumer), []).append(task)
-
-        results: typing.Final = await asyncio.gather(
-            *(
-                self._call_committer(
-                    ct,
-                    self._map_offsets_per_partition(consumer_id, ct, self._cancellation_watermarks),
-                )
-                for consumer_id, ct in consumers_tasks.items()
-            )
-        )
-
-        for _ in flat:
-            self._messages_queue.task_done()
-        self._uncommitted_count -= len(flat)
+    async def _commit_ready(self, ready_commits: list[_pending_state.ReadyCommit]) -> bool:
+        # One commit per consumer, concurrently — each AIOKafkaConsumer commits its
+        # own partitions. task_done()/uncommitted_count balance the queue regardless
+        # of commit success (re-queued tasks are re-counted inside _call_committer).
+        results: typing.Final = await asyncio.gather(*(self._call_committer(rc) for rc in ready_commits))
+        committed_count = 0
+        for rc in ready_commits:
+            committed_count += len(rc.tasks)
+            for _ in rc.tasks:
+                self._messages_queue.task_done()
+        self._uncommitted_count -= committed_count
         self._uncommitted_drained.set()
         return all(results)
 
@@ -197,7 +142,7 @@ class KafkaBatchCommitter:
         )
 
         try:
-            while not (state.should_shutdown and not state.pending):
+            while not (state.should_shutdown and not self._pending):
                 await self._streaming_iteration(state)
         finally:
             state.cancel_outstanding()
@@ -225,9 +170,7 @@ class KafkaBatchCommitter:
         if not state.should_shutdown and state.queue_get_task.done():
             new_ct = state.queue_get_task.result()
             self._track_user_task(new_ct)
-            _insert_sorted(state.pending.setdefault(new_ct.topic_partition, []), new_ct)
-            self._partition_owner[new_ct.topic_partition] = id(new_ct.consumer)
-            state.pending_count += 1
+            self._pending.absorb(new_ct)
             state.queue_get_task = asyncio.create_task(self._messages_queue.get())
             if state.timeout_deadline is None:
                 state.timeout_deadline = now + self._commit_batch_timeout_sec
@@ -245,13 +188,13 @@ class KafkaBatchCommitter:
             self._handle_flush_fired(state)
 
         ready: typing.Final = await self._maybe_commit(state, timeout_fired)
-        if state.flush_in_progress and not state.pending:
+        if state.flush_in_progress and not self._pending:
             state.flush_in_progress = False
 
         # Reset the deadline after any commit OR on timeout firing. Let it tick otherwise.
         # Invariant: pending empty ⇒ timeout_deadline is None.
         if ready or timeout_fired:
-            state.timeout_deadline = (loop.time() + self._commit_batch_timeout_sec) if state.pending else None
+            state.timeout_deadline = (loop.time() + self._commit_batch_timeout_sec) if self._pending else None
 
     def _handle_flush_fired(self, state: "_StreamingState") -> None:
         if self._stop_requested:
@@ -267,9 +210,7 @@ class KafkaBatchCommitter:
                 except asyncio.QueueEmpty:
                     break
                 self._track_user_task(ct)
-                _insert_sorted(state.pending.setdefault(ct.topic_partition, []), ct)
-                self._partition_owner[ct.topic_partition] = id(ct.consumer)
-                state.pending_count += 1
+                self._pending.absorb(ct)
             if not state.queue_get_task.done():
                 state.queue_get_task.cancel()
         else:
@@ -277,22 +218,19 @@ class KafkaBatchCommitter:
         self._flush_batch_event.clear()
         state.flush_wait_task = asyncio.create_task(self._flush_batch_event.wait())
 
-    async def _maybe_commit(
-        self, state: "_StreamingState", timeout_fired: bool
-    ) -> dict[TopicPartition, list[KafkaCommitTask]]:
+    async def _maybe_commit(self, state: "_StreamingState", timeout_fired: bool) -> list[_pending_state.ReadyCommit]:
         commit_triggered: typing.Final = (
-            state.pending_count >= self._commit_batch_size
+            len(self._pending) >= self._commit_batch_size
             or timeout_fired
             or state.flush_in_progress
             or state.should_shutdown
         )
         if not commit_triggered:
-            return {}
-        ready, ready_count = self._extract_ready_prefixes(state.pending)
-        if ready:
-            state.pending_count -= ready_count
-            await self._commit_partitions(ready)
-        return ready
+            return []
+        ready_commits: typing.Final = self._pending.take_ready()
+        if ready_commits:
+            await self._commit_ready(ready_commits)
+        return ready_commits
 
     async def commit_all(self, flush_timeout_sec: float = consts.DEFAULT_REBALANCE_FLUSH_TIMEOUT_SEC) -> None:
         """Flush and commit pending tasks without stopping the committer loop.
@@ -316,18 +254,9 @@ class KafkaBatchCommitter:
         """Forget cancellation watermarks for ``partitions`` (or all if ``None``).
 
         Called on partition revocation by the rebalance listener — the partition's
-        next assignment starts fresh, with no inherited "do not advance" floor. The
-        consumer to clear is resolved via the per-partition owner tracked in the
-        streaming loop, so the listener's API stays partition-only.
+        next assignment starts fresh, with no inherited "do not advance" floor.
         """
-        if partitions is None:
-            self._cancellation_watermarks.clear()
-            self._partition_owner.clear()
-            return
-        for partition in partitions:
-            owner = self._partition_owner.pop(partition, None)
-            if owner is not None:
-                self._cancellation_watermarks.pop((owner, partition), None)
+        self._pending.clear_watermarks(partitions)
 
     async def send_task(self, new_task: KafkaCommitTask) -> None:
         self._check_is_commit_task_running()

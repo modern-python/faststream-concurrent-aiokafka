@@ -79,7 +79,7 @@ class KafkaConcurrentHandler:
         self._is_running = False
 
         # Cancel in-flight user tasks. The committer treats cancelled tasks as a hard
-        # offset boundary (batch_committer._extract_ready_prefixes / _map_offsets_per_partition):
+        # offset boundary (_pending_state.extract_ready_prefixes / map_offsets_per_partition):
         # cancelled-and-after offsets stay uncommitted and get redelivered on restart.
         # Task.cancel() is a no-op on already-done tasks.
         for task in list(self._tracked_tasks):

@@ -10,11 +10,11 @@ import pytest_asyncio
 from aiokafka.errors import CommitFailedError, KafkaError
 from faststream.kafka import TopicPartition
 
+from faststream_concurrent_aiokafka import _pending_state
 from faststream_concurrent_aiokafka.batch_committer import (
     CommitterIsDeadError,
     KafkaBatchCommitter,
     KafkaCommitTask,
-    _insert_sorted,
 )
 from tests.mocks import MockAIOKafkaConsumer, MockAsyncioTask
 
@@ -203,8 +203,11 @@ async def test_committer_close_but_unexpected_error() -> None:
 # ---------- _call_committer ----------
 
 
-async def test_committer_returns_true_on_empty_offsets(committer: KafkaBatchCommitter) -> None:
-    result: typing.Final = await committer._call_committer([], {})
+async def test_committer_returns_true_on_empty_offsets(
+    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer, sample_task: KafkaCommitTask
+) -> None:
+    rc = _pending_state.ReadyCommit(consumer=mock_consumer, offsets={}, tasks=[sample_task])
+    result: typing.Final = await committer._call_committer(rc)
     assert result is True
 
 
@@ -217,7 +220,8 @@ async def test_committer_commits_to_kafka(committer: KafkaBatchCommitter, mock_c
         topic_partition=TopicPartition(topic="test-topic", partition=0),
     )
     partitions_to_offsets: typing.Final = {sample_task.topic_partition: 101}
-    result: typing.Final = await committer._call_committer([sample_task], partitions_to_offsets)
+    rc = _pending_state.ReadyCommit(consumer=mock_consumer, offsets=partitions_to_offsets, tasks=[sample_task])
+    result: typing.Final = await committer._call_committer(rc)
 
     assert result is True
     mock_consumer.commit.assert_called_once()
@@ -239,8 +243,8 @@ async def test_committer_retries_on_kafka_error(
     mock_consumer.commit.side_effect = KafkaError("transient broker error")
 
     partitions_to_offsets: typing.Final = {sample_task.topic_partition: 101}
-
-    result: typing.Final = await committer._call_committer([sample_task], partitions_to_offsets)
+    rc = _pending_state.ReadyCommit(consumer=mock_consumer, offsets=partitions_to_offsets, tasks=[sample_task])
+    result: typing.Final = await committer._call_committer(rc)
 
     assert result is False
     assert not committer._messages_queue.empty()
@@ -254,14 +258,14 @@ async def test_committer_ignores_commit_failed_error(
     """CommitFailedError (rebalance in progress) is silently ignored — no re-queue."""
     mock_consumer.commit.side_effect = CommitFailedError()
     partitions_to_offsets: typing.Final = {sample_task.topic_partition: 101}
-
-    result: typing.Final = await committer._call_committer([sample_task], partitions_to_offsets)
+    rc = _pending_state.ReadyCommit(consumer=mock_consumer, offsets=partitions_to_offsets, tasks=[sample_task])
+    result: typing.Final = await committer._call_committer(rc)
 
     assert result is False
     assert committer._messages_queue.empty()
 
 
-# ---------- _map_offsets_per_partition ----------
+# ---------- map_offsets_per_partition ----------
 
 
 def test_committer_map_offsets_skips_cancelled_tasks(mock_consumer: MockAIOKafkaConsumer) -> None:
@@ -292,7 +296,7 @@ def test_committer_map_offsets_skips_cancelled_tasks(mock_consumer: MockAIOKafka
         ),
     ]
 
-    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(id(mock_consumer), tasks, {})
+    offsets: typing.Final = _pending_state.map_offsets_per_partition(id(mock_consumer), tasks, {})
     # Only offset 10 is safe to commit; 11 was cancelled, 12 is beyond it.
     assert offsets[tp] == 11  # max safe offset (10) + 1
 
@@ -308,7 +312,7 @@ def test_committer_map_offsets_skips_partition_when_all_cancelled(mock_consumer:
         topic_partition=tp,
     )
 
-    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(id(mock_consumer), [task], {})
+    offsets: typing.Final = _pending_state.map_offsets_per_partition(id(mock_consumer), [task], {})
     assert tp not in offsets
 
 
@@ -327,7 +331,7 @@ def test_map_offsets_records_cancellation_watermark(mock_consumer: MockAIOKafkaC
     )
 
     watermarks: dict[tuple[int, TopicPartition], int] = {}
-    KafkaBatchCommitter._map_offsets_per_partition(id(mock_consumer), [task], watermarks)
+    _pending_state.map_offsets_per_partition(id(mock_consumer), [task], watermarks)
 
     assert watermarks == {(id(mock_consumer), tp): cancelled_offset}
 
@@ -343,7 +347,7 @@ def test_map_offsets_blocks_partition_when_watermark_present(mock_consumer: Mock
     )
 
     watermarks: dict[tuple[int, TopicPartition], int] = {(id(mock_consumer), tp): 11}
-    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(id(mock_consumer), [new_task], watermarks)
+    offsets: typing.Final = _pending_state.map_offsets_per_partition(id(mock_consumer), [new_task], watermarks)
 
     assert tp not in offsets
     assert watermarks == {(id(mock_consumer), tp): 11}  # unchanged
@@ -360,7 +364,7 @@ def test_map_offsets_keeps_earliest_watermark(mock_consumer: MockAIOKafkaConsume
     )
 
     watermarks: dict[tuple[int, TopicPartition], int] = {(id(mock_consumer), tp): 11}
-    KafkaBatchCommitter._map_offsets_per_partition(id(mock_consumer), [later_cancelled], watermarks)
+    _pending_state.map_offsets_per_partition(id(mock_consumer), [later_cancelled], watermarks)
 
     assert watermarks == {(id(mock_consumer), tp): 11}
 
@@ -388,7 +392,7 @@ def test_map_offsets_commits_max_before_cancellation_records_watermark(
     ]
 
     watermarks: dict[tuple[int, TopicPartition], int] = {}
-    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(id(mock_consumer), tasks, watermarks)
+    offsets: typing.Final = _pending_state.map_offsets_per_partition(id(mock_consumer), tasks, watermarks)
 
     assert offsets == {tp: successful_offset + 1}
     assert watermarks == {(id(mock_consumer), tp): cancelled_offset}
@@ -419,48 +423,26 @@ def test_map_offsets_watermark_isolated_per_consumer() -> None:
     )
 
     watermarks: dict[tuple[int, TopicPartition], int] = {}
-    KafkaBatchCommitter._map_offsets_per_partition(id(consumer_a), [cancelled_on_a], watermarks)
+    _pending_state.map_offsets_per_partition(id(consumer_a), [cancelled_on_a], watermarks)
     assert watermarks == {(id(consumer_a), tp): 5}
 
-    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(id(consumer_b), [success_on_b], watermarks)
+    offsets: typing.Final = _pending_state.map_offsets_per_partition(id(consumer_b), [success_on_b], watermarks)
     assert offsets == {tp: 21}, "Consumer B's commit must not be blocked by consumer A's watermark"
     # Consumer A's watermark stays intact for consumer A.
     assert watermarks == {(id(consumer_a), tp): 5}
 
 
-def test_clear_cancellation_watermarks_specific_partitions(
-    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
-) -> None:
-    tp_a: typing.Final = TopicPartition(topic="t", partition=0)
-    tp_b: typing.Final = TopicPartition(topic="t", partition=1)
-    consumer_id: typing.Final = id(mock_consumer)
-    # Pre-seed owner so clear can resolve which consumer's watermark to drop.
-    committer._partition_owner[tp_a] = consumer_id
-    committer._partition_owner[tp_b] = consumer_id
-    committer._cancellation_watermarks[(consumer_id, tp_a)] = 5
-    committer._cancellation_watermarks[(consumer_id, tp_b)] = 7
-
-    committer.clear_cancellation_watermarks([tp_a])
-
-    assert committer._cancellation_watermarks == {(consumer_id, tp_b): 7}
-    assert committer._partition_owner == {tp_b: consumer_id}
-
-
-def test_clear_cancellation_watermarks_all_when_none(
-    committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
-) -> None:
-    consumer_id: typing.Final = id(mock_consumer)
-    tp_a: typing.Final = TopicPartition(topic="t", partition=0)
-    tp_b: typing.Final = TopicPartition(topic="t", partition=1)
-    committer._partition_owner[tp_a] = consumer_id
-    committer._partition_owner[tp_b] = consumer_id
-    committer._cancellation_watermarks[(consumer_id, tp_a)] = 5
-    committer._cancellation_watermarks[(consumer_id, tp_b)] = 7
-
-    committer.clear_cancellation_watermarks()
-
-    assert committer._cancellation_watermarks == {}
-    assert committer._partition_owner == {}
+def test_clear_cancellation_watermarks_delegates_to_pending(committer: KafkaBatchCommitter) -> None:
+    """clear_cancellation_watermarks forwards its partitions argument verbatim to PendingCommits."""
+    tp: typing.Final = TopicPartition(topic="t", partition=0)
+    # Verify the wiring (the right argument is passed through); the clear logic itself is
+    # covered against PendingCommits in test_pending_commits.py.
+    with patch.object(committer._pending, "clear_watermarks") as mock_clear:
+        committer.clear_cancellation_watermarks([tp])
+        committer.clear_cancellation_watermarks()
+    assert mock_clear.call_count == 2
+    assert mock_clear.call_args_list[0].args == ([tp],)
+    assert mock_clear.call_args_list[1].args == (None,)
 
 
 def test_committer_map_offsets_advances_to_max_per_partition(mock_consumer: MockAIOKafkaConsumer) -> None:
@@ -491,17 +473,17 @@ def test_committer_map_offsets_advances_to_max_per_partition(mock_consumer: Mock
             )
         )
 
-    offsets: typing.Final = KafkaBatchCommitter._map_offsets_per_partition(id(mock_consumer), tasks, {})
+    offsets: typing.Final = _pending_state.map_offsets_per_partition(id(mock_consumer), tasks, {})
     assert offsets[TopicPartition(topic="t1", partition=0)] == first_offset + 10 + 1
     assert offsets[TopicPartition(topic="t1", partition=partition)] == second_offset + 1
 
 
-# ---------- _extract_ready_prefixes ----------
+# ---------- extract_ready_prefixes ----------
 
 
 def test_extract_ready_prefixes_empty_pending() -> None:
     pending: dict[TopicPartition, list[KafkaCommitTask]] = {}
-    ready, ready_count = KafkaBatchCommitter._extract_ready_prefixes(pending)
+    ready, ready_count = _pending_state.extract_ready_prefixes(pending)
     assert ready == {}
     assert ready_count == 0
     assert pending == {}
@@ -520,7 +502,7 @@ def test_extract_ready_prefixes_all_done(mock_consumer: MockAIOKafkaConsumer) ->
     ]
     pending: dict[TopicPartition, list[KafkaCommitTask]] = {tp: list(tasks)}
 
-    ready, ready_count = KafkaBatchCommitter._extract_ready_prefixes(pending)
+    ready, ready_count = _pending_state.extract_ready_prefixes(pending)
 
     assert ready == {tp: tasks}
     assert ready_count == 3
@@ -552,7 +534,7 @@ def test_extract_ready_prefixes_blocks_on_first_pending(mock_consumer: MockAIOKa
     ]
     pending: dict[TopicPartition, list[KafkaCommitTask]] = {tp: list(tasks)}
 
-    ready, ready_count = KafkaBatchCommitter._extract_ready_prefixes(pending)
+    ready, ready_count = _pending_state.extract_ready_prefixes(pending)
 
     assert ready == {tp: [tasks[0]]}  # only the prefix before offset 11
     assert ready_count == 1
@@ -562,7 +544,7 @@ def test_extract_ready_prefixes_blocks_on_first_pending(mock_consumer: MockAIOKa
 def test_extract_ready_prefixes_cancelled_drops_partition(mock_consumer: MockAIOKafkaConsumer) -> None:
     """Cancelled task drops cancelled + everything after from pending into ready.
 
-    task_done() balances messages_queue.join() that way. _map_offsets_per_partition
+    task_done() balances messages_queue.join() that way. map_offsets_per_partition
     separately stops the offset advance at the cancelled task so it gets redelivered.
     """
     tp: typing.Final = TopicPartition(topic="t", partition=0)
@@ -588,7 +570,7 @@ def test_extract_ready_prefixes_cancelled_drops_partition(mock_consumer: MockAIO
     ]
     pending: dict[TopicPartition, list[KafkaCommitTask]] = {tp: list(tasks)}
 
-    ready, ready_count = KafkaBatchCommitter._extract_ready_prefixes(pending)
+    ready, ready_count = _pending_state.extract_ready_prefixes(pending)
 
     assert ready == {tp: tasks}  # all three included in ready
     assert ready_count == 3
@@ -600,7 +582,7 @@ def test_insert_sorted_appends_in_order(mock_consumer: MockAIOKafkaConsumer) -> 
     tp: typing.Final = TopicPartition(topic="t", partition=0)
     pending: list[KafkaCommitTask] = []
     for offset in (10, 11, 12):
-        _insert_sorted(
+        _pending_state.insert_sorted(
             pending,
             KafkaCommitTask(
                 asyncio_task=MockAsyncioTask(done=True),  # ty: ignore[invalid-argument-type]
@@ -617,7 +599,7 @@ def test_insert_sorted_bisects_out_of_order(mock_consumer: MockAIOKafkaConsumer)
     tp: typing.Final = TopicPartition(topic="t", partition=0)
     pending: list[KafkaCommitTask] = []
     for offset in (10, 11):
-        _insert_sorted(
+        _pending_state.insert_sorted(
             pending,
             KafkaCommitTask(
                 asyncio_task=MockAsyncioTask(done=True),  # ty: ignore[invalid-argument-type]
@@ -626,7 +608,7 @@ def test_insert_sorted_bisects_out_of_order(mock_consumer: MockAIOKafkaConsumer)
                 topic_partition=tp,
             ),
         )
-    _insert_sorted(
+    _pending_state.insert_sorted(
         pending,
         KafkaCommitTask(
             asyncio_task=MockAsyncioTask(done=True),  # ty: ignore[invalid-argument-type]
@@ -638,10 +620,10 @@ def test_insert_sorted_bisects_out_of_order(mock_consumer: MockAIOKafkaConsumer)
     assert [t.offset for t in pending] == [5, 10, 11]
 
 
-# ---------- _commit_partitions ----------
+# ---------- _commit_ready ----------
 
 
-async def test_commit_partitions_calls_commit_per_partition_max(
+async def test_commit_ready_calls_commit_per_partition_max(
     committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
 ) -> None:
     """All-done tasks → one commit call with max offset per partition (next-to-fetch = max + 1)."""
@@ -661,13 +643,18 @@ async def test_commit_partitions_calls_commit_per_partition_max(
         await committer._messages_queue.put(t)
     [await committer._messages_queue.get() for _ in tasks]
 
-    result: typing.Final = await committer._commit_partitions({tp: tasks})
+    rc = _pending_state.ReadyCommit(
+        consumer=mock_consumer,
+        offsets=_pending_state.map_offsets_per_partition(id(mock_consumer), tasks, {}),
+        tasks=tasks,
+    )
+    result: typing.Final = await committer._commit_ready([rc])
 
     assert result is True
     mock_consumer.commit.assert_called_once_with({tp: expected_offset + 2})
 
 
-async def test_commit_partitions_partial_failure_still_commits_offset(
+async def test_commit_ready_partial_failure_still_commits_offset(
     committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
 ) -> None:
     """One task raising still commits the partition's max offset.
@@ -697,12 +684,17 @@ async def test_commit_partitions_partial_failure_still_commits_offset(
         await committer._messages_queue.put(t)
     [await committer._messages_queue.get() for _ in tasks]
 
-    await committer._commit_partitions({tp: tasks})
+    rc = _pending_state.ReadyCommit(
+        consumer=mock_consumer,
+        offsets=_pending_state.map_offsets_per_partition(id(mock_consumer), tasks, {}),
+        tasks=tasks,
+    )
+    await committer._commit_ready([rc])
 
     mock_consumer.commit.assert_called_once_with({tp: 102})
 
 
-async def test_commit_partitions_handles_multiple_consumers(committer: KafkaBatchCommitter) -> None:
+async def test_commit_ready_handles_multiple_consumers(committer: KafkaBatchCommitter) -> None:
     """Each consumer's commit is called with only its own partitions — no cross-consumer commits."""
     consumer_a: typing.Final = MockAIOKafkaConsumer()
     consumer_b: typing.Final = MockAIOKafkaConsumer()
@@ -726,16 +718,26 @@ async def test_commit_partitions_handles_multiple_consumers(committer: KafkaBatc
         await committer._messages_queue.put(t)
     [await committer._messages_queue.get() for _ in range(2)]
 
-    await committer._commit_partitions({tp_a: [task_a], tp_b: [task_b]})
+    rc_a = _pending_state.ReadyCommit(
+        consumer=consumer_a,
+        offsets=_pending_state.map_offsets_per_partition(id(consumer_a), [task_a], {}),
+        tasks=[task_a],
+    )
+    rc_b = _pending_state.ReadyCommit(
+        consumer=consumer_b,
+        offsets=_pending_state.map_offsets_per_partition(id(consumer_b), [task_b], {}),
+        tasks=[task_b],
+    )
+    await committer._commit_ready([rc_a, rc_b])
 
     consumer_a.commit.assert_called_once_with({tp_a: 11})
     consumer_b.commit.assert_called_once_with({tp_b: 21})
 
 
-async def test_commit_partitions_returns_false_on_commit_failure(
+async def test_commit_ready_returns_false_on_commit_failure(
     committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
 ) -> None:
-    """_commit_partitions returns False when _call_committer fails."""
+    """_commit_ready returns False when _call_committer fails."""
     task: typing.Final = MockAsyncioTask(result="ok")
     tp: typing.Final = TopicPartition(topic="t", partition=0)
     commit_task: typing.Final = KafkaCommitTask(
@@ -747,13 +749,14 @@ async def test_commit_partitions_returns_false_on_commit_failure(
     await committer._messages_queue.put(commit_task)
     await committer._messages_queue.get()
 
+    rc = _pending_state.ReadyCommit(consumer=mock_consumer, offsets={tp: 2}, tasks=[commit_task])
     with patch.object(committer, "_call_committer", new_callable=AsyncMock, return_value=False):
-        result: typing.Final = await committer._commit_partitions({tp: [commit_task]})
+        result: typing.Final = await committer._commit_ready([rc])
 
     assert result is False
 
 
-async def test_commit_partitions_returns_false_if_any_consumer_group_fails(
+async def test_commit_ready_returns_false_if_any_consumer_group_fails(
     committer: KafkaBatchCommitter,
 ) -> None:
     """If any consumer's commit slice fails, the overall return is False."""
@@ -780,13 +783,23 @@ async def test_commit_partitions_returns_false_if_any_consumer_group_fails(
         await committer._messages_queue.put(t)
     [await committer._messages_queue.get() for _ in range(2)]
 
-    result: typing.Final = await committer._commit_partitions({tp_a: [task_a], tp_b: [task_b]})
+    rc_a = _pending_state.ReadyCommit(
+        consumer=consumer_a,
+        offsets=_pending_state.map_offsets_per_partition(id(consumer_a), [task_a], {}),
+        tasks=[task_a],
+    )
+    rc_b = _pending_state.ReadyCommit(
+        consumer=consumer_b,
+        offsets=_pending_state.map_offsets_per_partition(id(consumer_b), [task_b], {}),
+        tasks=[task_b],
+    )
+    result: typing.Final = await committer._commit_ready([rc_a, rc_b])
 
     assert result is False
     consumer_b.commit.assert_called_once()  # b still committed independently
 
 
-async def test_commit_partitions_cancelled_task_not_logged_as_error(
+async def test_commit_ready_cancelled_task_not_logged_as_error(
     committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A cancelled task is not an error — it must not produce an error log line."""
@@ -802,7 +815,12 @@ async def test_commit_partitions_cancelled_task_not_logged_as_error(
     await committer._messages_queue.put(commit_task)
     await committer._messages_queue.get()
 
-    await committer._commit_partitions({tp: [commit_task]})
+    rc = _pending_state.ReadyCommit(
+        consumer=mock_consumer,
+        offsets=_pending_state.map_offsets_per_partition(id(mock_consumer), [commit_task], {}),
+        tasks=[commit_task],
+    )
+    await committer._commit_ready([rc])
 
     assert "Task has finished with an exception" not in caplog.text
 
@@ -1014,7 +1032,7 @@ async def test_streaming_skips_cancelled_head_in_wait_set() -> None:
     # Timeout fires → loop's _pending_head_tasks sees the cancelled head and skips it; the
     # subsequent commit drops the cancelled task without advancing offsets.
     await committer.close()
-    # No commit was issued for this partition — _map_offsets_per_partition produced an empty
+    # No commit was issued for this partition — map_offsets_per_partition produced an empty
     # map (cancelled task), and _call_committer returns early when the offsets dict is empty.
     consumer.commit.assert_not_called()
 
