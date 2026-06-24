@@ -6,7 +6,7 @@ summary: Extract the streaming loop's when-to-commit decision state into a pure 
 supersedes: null
 superseded_by: null
 pr: "40"
-outcome: "PR #40 opened; merge pending CI's full Redpanda gate on HEAD (Docker outage blocked the local re-run of the no-op follow-up commit). Behavioural commit d1dc6a8 verified green at 138/138 on real Redpanda; e6183c9 at 141/141 @ 100%."
+outcome: "Merged as #40 (squash d3aa133). Full suite green on real Redpanda in CI across Python 3.11–3.14 at 100% coverage."
 ---
 
 # Design: Extract the commit-timing decisions into `CommitScheduler`
