@@ -152,6 +152,13 @@ class PendingCommits:
         return result
 
     def clear_watermarks(self, partitions: typing.Iterable[TopicPartition] | None = None) -> None:
+        # Drops every consumer's floor for the given partitions, not just one owner's. This
+        # is safe because cancellation watermarks are only ever written during handler.stop()
+        # — the sole path that cancels user tasks — when every consumer sharing this
+        # PendingCommits is torn down together. There is therefore no live consumer whose
+        # floor could be wrongly cleared here and then advance past its cancelled offset. If a
+        # non-shutdown task-cancellation path is ever added, scope this to the revoked
+        # consumer's id instead (see test_clear_cancellation_watermarks_delegates_to_pending).
         if partitions is None:
             self._watermarks.clear()
             return

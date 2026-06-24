@@ -433,11 +433,16 @@ def test_map_offsets_watermark_isolated_per_consumer() -> None:
 
 
 def test_clear_cancellation_watermarks_delegates_to_pending(committer: KafkaBatchCommitter) -> None:
-    """clear_cancellation_watermarks delegates to self._pending.clear_watermarks (smoke test)."""
+    """clear_cancellation_watermarks forwards its partitions argument verbatim to PendingCommits."""
     tp: typing.Final = TopicPartition(topic="t", partition=0)
-    # No-op calls must not raise; logic is covered by test_pending_commits.py.
-    committer.clear_cancellation_watermarks([tp])
-    committer.clear_cancellation_watermarks()
+    # Verify the wiring (the right argument is passed through); the clear logic itself is
+    # covered against PendingCommits in test_pending_commits.py.
+    with patch.object(committer._pending, "clear_watermarks") as mock_clear:
+        committer.clear_cancellation_watermarks([tp])
+        committer.clear_cancellation_watermarks()
+    assert mock_clear.call_count == 2
+    assert mock_clear.call_args_list[0].args == ([tp],)
+    assert mock_clear.call_args_list[1].args == (None,)
 
 
 def test_committer_map_offsets_advances_to_max_per_partition(mock_consumer: MockAIOKafkaConsumer) -> None:

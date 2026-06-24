@@ -121,10 +121,12 @@ class KafkaBatchCommitter:
         # own partitions. task_done()/uncommitted_count balance the queue regardless
         # of commit success (re-queued tasks are re-counted inside _call_committer).
         results: typing.Final = await asyncio.gather(*(self._call_committer(rc) for rc in ready_commits))
+        committed_count = 0
         for rc in ready_commits:
+            committed_count += len(rc.tasks)
             for _ in rc.tasks:
                 self._messages_queue.task_done()
-        self._uncommitted_count -= sum(len(rc.tasks) for rc in ready_commits)
+        self._uncommitted_count -= committed_count
         self._uncommitted_drained.set()
         return all(results)
 
