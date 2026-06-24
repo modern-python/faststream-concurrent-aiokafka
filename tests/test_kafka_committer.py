@@ -265,7 +265,7 @@ async def test_committer_ignores_commit_failed_error(
     assert committer._messages_queue.empty()
 
 
-# ---------- _map_offsets_per_partition ----------
+# ---------- map_offsets_per_partition ----------
 
 
 def test_committer_map_offsets_skips_cancelled_tasks(mock_consumer: MockAIOKafkaConsumer) -> None:
@@ -473,7 +473,7 @@ def test_committer_map_offsets_advances_to_max_per_partition(mock_consumer: Mock
     assert offsets[TopicPartition(topic="t1", partition=partition)] == second_offset + 1
 
 
-# ---------- _extract_ready_prefixes ----------
+# ---------- extract_ready_prefixes ----------
 
 
 def test_extract_ready_prefixes_empty_pending() -> None:
@@ -539,7 +539,7 @@ def test_extract_ready_prefixes_blocks_on_first_pending(mock_consumer: MockAIOKa
 def test_extract_ready_prefixes_cancelled_drops_partition(mock_consumer: MockAIOKafkaConsumer) -> None:
     """Cancelled task drops cancelled + everything after from pending into ready.
 
-    task_done() balances messages_queue.join() that way. _map_offsets_per_partition
+    task_done() balances messages_queue.join() that way. map_offsets_per_partition
     separately stops the offset advance at the cancelled task so it gets redelivered.
     """
     tp: typing.Final = TopicPartition(topic="t", partition=0)
@@ -1027,7 +1027,7 @@ async def test_streaming_skips_cancelled_head_in_wait_set() -> None:
     # Timeout fires → loop's _pending_head_tasks sees the cancelled head and skips it; the
     # subsequent commit drops the cancelled task without advancing offsets.
     await committer.close()
-    # No commit was issued for this partition — _map_offsets_per_partition produced an empty
+    # No commit was issued for this partition — map_offsets_per_partition produced an empty
     # map (cancelled task), and _call_committer returns early when the offsets dict is empty.
     consumer.commit.assert_not_called()
 

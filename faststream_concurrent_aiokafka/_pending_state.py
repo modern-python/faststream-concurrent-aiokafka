@@ -31,11 +31,11 @@ def insert_sorted(partition_pending: list[KafkaCommitTask], new_ct: KafkaCommitT
 def extract_ready_prefixes(
     pending: dict[TopicPartition, list[KafkaCommitTask]],
 ) -> tuple[dict[TopicPartition, list[KafkaCommitTask]], int]:
-    # Pending lists are maintained in offset order by _insert_sorted. Per partition, find
+    # Pending lists are maintained in offset order by insert_sorted. Per partition, find
     # the first not-done task; tasks before it form the contiguous-done prefix and become
     # "ready". A cancelled task is treated as a hard boundary: cancelled + everything after
     # is dropped from pending and added to ready (so task_done() balances
-    # messages_queue.join), while _map_offsets_per_partition stops the offset advance at
+    # messages_queue.join), while map_offsets_per_partition stops the offset advance at
     # the cancelled task so the uncommitted offsets get redelivered on restart
     # (at-least-once). Returns (ready, count) so the caller can update its cached
     # pending_count without re-summing list lengths.
