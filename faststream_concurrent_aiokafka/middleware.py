@@ -163,6 +163,8 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
                     logger.warning("Kafka middleware. Task cancelled during shutdown")
                     raise
                 return None
+            case _:  # pragma: no cover - exhaustiveness guard; ty verifies _Route is fully covered
+                typing.assert_never(route)
 
 
 async def initialize_concurrent_processing(  # noqa: PLR0913

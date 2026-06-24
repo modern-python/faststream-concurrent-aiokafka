@@ -519,8 +519,11 @@ async def test_middleware_initialize_passes_max_uncommitted_tasks(setup_broker: 
 
 # ---------- _classify: the pure routing decision (no broker / context / consumer plumbing) ----------
 
-_HANDLER_RUNNING: typing.Final = MagicMock(is_running=True)
-_HANDLER_STOPPED: typing.Final = MagicMock(is_running=False)
+
+def _handler(*, is_running: bool) -> typing.Any:
+    # Fresh per call (no shared module-level state); spec=KafkaConcurrentHandler so a future
+    # rename of `is_running` surfaces as AttributeError instead of a silently-truthy mock.
+    return MagicMock(spec=KafkaConcurrentHandler, is_running=is_running)
 
 
 def _attrs(*, is_fake: bool = False, auto_commit: bool = False) -> _ConsumerAttrs:
@@ -529,19 +532,21 @@ def _attrs(*, is_fake: bool = False, auto_commit: bool = False) -> _ConsumerAttr
 
 def test_classify_fake_consumer_passes_through() -> None:
     route: typing.Final = _classify(
-        committed=None, attrs=_attrs(is_fake=True), handler=_HANDLER_RUNNING, is_batch=False
+        committed=None, attrs=_attrs(is_fake=True), handler=_handler(is_running=True), is_batch=False
     )
     assert route == _PassThrough()
 
 
 def test_classify_non_manual_ack_passes_through() -> None:
     # committed is not None → auto-ack subscriber; FastStream manages its offsets.
-    route: typing.Final = _classify(committed=object(), attrs=_attrs(), handler=_HANDLER_RUNNING, is_batch=False)
+    route: typing.Final = _classify(
+        committed=object(), attrs=_attrs(), handler=_handler(is_running=True), is_batch=False
+    )
     assert route == _PassThrough()
 
 
 def test_classify_batch_subscriber_refused() -> None:
-    route: typing.Final = _classify(committed=None, attrs=_attrs(), handler=_HANDLER_RUNNING, is_batch=True)
+    route: typing.Final = _classify(committed=None, attrs=_attrs(), handler=_handler(is_running=True), is_batch=True)
     assert isinstance(route, _Refuse)
     assert "batch subscribers" in route.reason
 
@@ -553,20 +558,20 @@ def test_classify_missing_handler_refused() -> None:
 
 
 def test_classify_handler_shutting_down_skips() -> None:
-    route: typing.Final = _classify(committed=None, attrs=_attrs(), handler=_HANDLER_STOPPED, is_batch=False)
+    route: typing.Final = _classify(committed=None, attrs=_attrs(), handler=_handler(is_running=False), is_batch=False)
     assert route == _Skip()
 
 
 def test_classify_auto_commit_refused() -> None:
     route: typing.Final = _classify(
-        committed=None, attrs=_attrs(auto_commit=True), handler=_HANDLER_RUNNING, is_batch=False
+        committed=None, attrs=_attrs(auto_commit=True), handler=_handler(is_running=True), is_batch=False
     )
     assert isinstance(route, _Refuse)
     assert "AckPolicy.MANUAL" in route.reason
 
 
 def test_classify_manual_ack_running_dispatches() -> None:
-    route: typing.Final = _classify(committed=None, attrs=_attrs(), handler=_HANDLER_RUNNING, is_batch=False)
+    route: typing.Final = _classify(committed=None, attrs=_attrs(), handler=_handler(is_running=True), is_batch=False)
     assert route == _Dispatch()
 
 
@@ -576,3 +581,11 @@ def test_classify_branch_order_batch_wins_over_handler_and_auto_commit() -> None
     route: typing.Final = _classify(committed=None, attrs=_attrs(auto_commit=True), handler=None, is_batch=True)
     assert isinstance(route, _Refuse)
     assert "batch subscribers" in route.reason
+
+
+def test_classify_branch_order_missing_handler_wins_over_auto_commit() -> None:
+    # No handler AND auto_commit: the missing-handler check precedes auto-commit, so its error
+    # wins. Pins the second load-bearing ordering against a future branch swap.
+    route: typing.Final = _classify(committed=None, attrs=_attrs(auto_commit=True), handler=None, is_batch=False)
+    assert isinstance(route, _Refuse)
+    assert "not running" in route.reason
