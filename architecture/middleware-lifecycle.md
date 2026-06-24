@@ -10,6 +10,14 @@ Its `consume_scope` retrieves the handler from `self.context` (the key
 `"concurrent_processing"`) and decides whether to route the message through the
 concurrent handler.
 
+The routing decision is a pure synchronous `_classify(*, committed, attrs,
+handler, is_batch) -> _Route` (in `middleware.py`), where `_Route` is one of
+`_PassThrough` / `_Dispatch` / `_Skip` / `_Refuse(reason)`. `consume_scope`
+validates the message exists, computes the inputs, then `match`es the route to
+its action (pass through / dispatch / log-and-skip / raise). The decision is
+unit-tested as a pure function; the branch *order* below is load-bearing — a
+multiply-misconfigured subscriber gets the first matching branch's error.
+
 Pass-through cases (the message is processed normally, not concurrently):
 
 - a FakeConsumer, i.e. running under `TestKafkaBroker`;
