@@ -1,12 +1,12 @@
 ---
-status: draft
+status: shipped
 date: 2026-06-24
 slug: route-classify-extraction
 summary: Extract consume_scope's 8-branch message classification into a pure _classify(...) -> _Route; consume_scope becomes a precondition + match.
 supersedes: null
 superseded_by: null
-pr: null
-outcome: null
+pr: "41"
+outcome: "PR #41 opened; merge pending CI's full Redpanda gate (Docker outage blocked the local run). middleware.py at 100% coverage from the non-Docker middleware suite (29 passed); behaviour-preserving."
 ---
 
 # Change: Lift the route decision out of `consume_scope`
