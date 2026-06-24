@@ -1348,3 +1348,73 @@ async def test_send_task_unblocks_with_dead_committer_error() -> None:
 
     with pytest.raises(CommitterIsDeadError):
         await asyncio.wait_for(blocked, timeout=1.0)
+
+
+# ---------- close() with already-finished-cleanly task (exception is None) ----------
+
+
+async def test_committer_close_when_task_already_finished_cleanly(caplog: pytest.LogCaptureFixture) -> None:
+    """close() on a committer whose task already completed normally (not crashed, not cancelled).
+
+    Must return without logging a warning — exercise the exc-is-None branch.
+    """
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=0.01, commit_batch_size=10)
+    committer.spawn()
+    # Let the loop run and then let it exit cleanly by requesting shutdown with no pending work.
+    committer._stop_requested = True
+    committer._flush_batch_event.set()
+    # Wait for the task to finish naturally (it has no pending items so is_finished fires quickly).
+    assert committer._commit_task is not None
+    await asyncio.wait_for(committer._commit_task, timeout=1.0)
+    assert committer._commit_task.done()
+    assert not committer._commit_task.cancelled()
+    assert committer._commit_task.exception() is None  # normal exit, not a crash
+
+    # close() must not log "had already died" since there was no exception.
+    await committer.close()
+    assert "Committer task had already died before close()" not in caplog.text
+
+
+# ---------- _streaming_iteration: accepts_new_work() is False (post-shutdown loop) ----------
+
+
+async def test_streaming_skips_queue_task_when_shutdown_in_progress() -> None:
+    """After shutdown is triggered, the streaming iteration must not include queue_get in the wait set.
+
+    (accepts_new_work() → False).  Exercised by a slow in-flight task that keeps the loop alive
+    through at least one post-shutdown iteration.
+    """
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    committer.spawn()
+
+    # A slow task keeps pending non-empty across the shutdown flush, forcing the loop to
+    # re-enter _streaming_iteration with accepts_new_work()=False.
+    slow_event: typing.Final = asyncio.Event()
+
+    async def slow() -> None:
+        await slow_event.wait()
+
+    tp: typing.Final = TopicPartition(topic="t", partition=0)
+    slow_task: typing.Final = asyncio.create_task(slow())
+    await committer.send_task(
+        KafkaCommitTask(
+            asyncio_task=slow_task,
+            offset=1,
+            consumer=consumer,
+            topic_partition=tp,
+        )
+    )
+
+    # Trigger shutdown — sets stop_requested + flush, so the next evaluate() call produces
+    # drain_queue_now=True and marks should_shutdown=True.  Loop will re-enter with
+    # accepts_new_work()=False while slow_task is still pending.
+    close_task: typing.Final = asyncio.create_task(committer.close())
+    await asyncio.sleep(0.02)  # let the loop enter the post-shutdown iteration
+
+    # Unblock the slow task so pending drains and the loop can exit.
+    slow_event.set()
+    await asyncio.wait_for(close_task, timeout=2.0)
+
+    assert not committer.is_healthy
+    consumer.commit.assert_called_once_with({tp: 2})

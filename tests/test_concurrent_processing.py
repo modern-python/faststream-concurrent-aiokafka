@@ -257,8 +257,7 @@ async def test_concurrent_full_lifecycle() -> None:
         await handler.handle_task(process_msg(i), record, msg)  # ty: ignore[invalid-argument-type]
 
     # Let tasks complete naturally before stop, then assert lifecycle is clean.
-    if handler._tracked_tasks:
-        await asyncio.gather(*list(handler._tracked_tasks), return_exceptions=True)
+    await asyncio.gather(*list(handler._tracked_tasks), return_exceptions=True)
 
     await handler.stop()
 
