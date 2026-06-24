@@ -47,10 +47,6 @@ class _StreamingState:
                 task.cancel()
 
 
-def _insert_sorted(partition_pending: list[KafkaCommitTask], new_ct: KafkaCommitTask) -> None:
-    _pending_state.insert_sorted(partition_pending, new_ct)
-
-
 class KafkaBatchCommitter:
     def __init__(
         self,
@@ -119,20 +115,6 @@ class KafkaBatchCommitter:
             return False
         else:
             return True
-
-    @staticmethod
-    def _map_offsets_per_partition(
-        consumer_id: int,
-        consumer_tasks: list[KafkaCommitTask],
-        watermarks: dict[tuple[int, TopicPartition], int],
-    ) -> dict[TopicPartition, int]:
-        return _pending_state.map_offsets_per_partition(consumer_id, consumer_tasks, watermarks)
-
-    @staticmethod
-    def _extract_ready_prefixes(
-        pending: dict[TopicPartition, list[KafkaCommitTask]],
-    ) -> tuple[dict[TopicPartition, list[KafkaCommitTask]], int]:
-        return _pending_state.extract_ready_prefixes(pending)
 
     async def _commit_ready(self, ready_commits: list[_pending_state.ReadyCommit]) -> bool:
         # One commit per consumer, concurrently — each AIOKafkaConsumer commits its
