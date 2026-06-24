@@ -72,6 +72,7 @@ def test_watermark_blocks_advance_until_cleared(mock_consumer: MockAIOKafkaConsu
     # A later done task on the same partition must not advance past the floor.
     pending.absorb(make_commit_task(mock_consumer, _tp(), offset=1, done=True))
     assert pending.take_ready()[0].offsets == {}  # withheld
+    assert len(pending) == 0
 
     pending.clear_watermarks([_tp()])
     pending.absorb(make_commit_task(mock_consumer, _tp(), offset=2, done=True))
@@ -86,6 +87,8 @@ def test_clear_watermarks_all_when_none(mock_consumer: MockAIOKafkaConsumer) -> 
     pending.clear_watermarks()  # None → clear all
     pending.absorb(make_commit_task(mock_consumer, _tp(0), offset=1, done=True))
     assert pending.take_ready()[0].offsets == {_tp(0): 2}
+    pending.absorb(make_commit_task(mock_consumer, _tp(1), offset=1, done=True))
+    assert pending.take_ready()[0].offsets == {_tp(1): 2}
 
 
 def test_two_consumers_same_partition_commit_independently() -> None:
@@ -97,4 +100,20 @@ def test_two_consumers_same_partition_commit_independently() -> None:
     ready = {id(rc.consumer): rc for rc in pending.take_ready()}
 
     assert ready[id(a)].offsets == {_tp(): 1}
+    assert ready[id(b)].offsets == {_tp(): 2}
+
+
+def test_clear_watermarks_clears_every_consumer_on_partition() -> None:
+    a, b = MockAIOKafkaConsumer(), MockAIOKafkaConsumer()
+    pending = PendingCommits()
+    pending.absorb(make_commit_task(a, _tp(), offset=0, cancelled=True))
+    pending.absorb(make_commit_task(b, _tp(), offset=0, cancelled=True))
+    pending.take_ready()  # records watermarks for both (id(a), tp) and (id(b), tp)
+
+    pending.clear_watermarks([_tp()])
+
+    pending.absorb(make_commit_task(a, _tp(), offset=1, done=True))
+    pending.absorb(make_commit_task(b, _tp(), offset=1, done=True))
+    ready = {id(rc.consumer): rc for rc in pending.take_ready()}
+    assert ready[id(a)].offsets == {_tp(): 2}
     assert ready[id(b)].offsets == {_tp(): 2}

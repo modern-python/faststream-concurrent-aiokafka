@@ -113,7 +113,7 @@ class ReadyCommit:
 
 
 class PendingCommits:
-    """Owns per-partition pending commit tasks, pending count, cancellation watermarks, and partition owners.
+    """Owns per-partition pending commit tasks, pending count, and cancellation watermarks.
 
     Synchronous and single-owner: the committer's streaming loop is the sole
     mutator, so no locking is needed. Reads asyncio task state (done/cancelled)
@@ -124,14 +124,12 @@ class PendingCommits:
         self._pending: dict[TopicPartition, list[KafkaCommitTask]] = {}
         self._count: int = 0
         self._watermarks: dict[tuple[int, TopicPartition], int] = {}
-        self._partition_owner: dict[TopicPartition, int] = {}
 
     def __len__(self) -> int:
         return self._count
 
     def absorb(self, ct: KafkaCommitTask) -> None:
         insert_sorted(self._pending.setdefault(ct.topic_partition, []), ct)
-        self._partition_owner[ct.topic_partition] = id(ct.consumer)
         self._count += 1
 
     def take_ready(self) -> list[ReadyCommit]:
@@ -156,9 +154,7 @@ class PendingCommits:
     def clear_watermarks(self, partitions: typing.Iterable[TopicPartition] | None = None) -> None:
         if partitions is None:
             self._watermarks.clear()
-            self._partition_owner.clear()
             return
-        for partition in partitions:
-            owner = self._partition_owner.pop(partition, None)
-            if owner is not None:
-                self._watermarks.pop((owner, partition), None)
+        target: typing.Final = set(partitions)
+        for key in [k for k in self._watermarks if k[1] in target]:
+            del self._watermarks[key]
