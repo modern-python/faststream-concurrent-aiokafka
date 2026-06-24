@@ -199,8 +199,9 @@ class KafkaBatchCommitter:
                     break
                 self._track_user_task(ct)
                 self._pending.absorb(ct)
-            if not tasks.queue_get_task.done():
-                tasks.queue_get_task.cancel()
+            # Drop the outstanding queue_get; we will not read more items while shutting
+            # down. cancel() is a harmless no-op if it already completed.
+            tasks.queue_get_task.cancel()
         self._flush_batch_event.clear()
         tasks.flush_wait_task = asyncio.create_task(self._flush_batch_event.wait())
 

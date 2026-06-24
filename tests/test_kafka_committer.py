@@ -15,7 +15,6 @@ from faststream_concurrent_aiokafka.batch_committer import (
     CommitterIsDeadError,
     KafkaBatchCommitter,
     KafkaCommitTask,
-    _LoopTasks,
 )
 from tests.mocks import MockAIOKafkaConsumer, MockAsyncioTask
 
@@ -1419,46 +1418,3 @@ async def test_streaming_skips_queue_task_when_shutdown_in_progress() -> None:
 
     assert not committer.is_healthy
     consumer.commit.assert_called_once_with({tp: 2})
-
-
-# ---------- _handle_flush_fired: queue_get_task already done (no cancel needed) ----------
-
-
-async def test_handle_flush_fired_skips_cancel_when_queue_get_already_done() -> None:
-    """When drain_queue=True and queue_get_task is already done, cancel must not be called.
-
-    Exercised by calling _handle_flush_fired directly with a pre-done queue_get_task.
-    """
-    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
-    # Build a minimal _LoopTasks where queue_get_task is already done.
-    loop: typing.Final = asyncio.get_running_loop()
-
-    done_future: typing.Final = loop.create_future()
-    consumer: typing.Final = MockAIOKafkaConsumer()
-    mock_asyncio_task: typing.Final = MockAsyncioTask(result="ok")
-    done_future.set_result(
-        KafkaCommitTask(
-            asyncio_task=mock_asyncio_task,  # ty: ignore[invalid-argument-type]
-            offset=5,
-            consumer=consumer,
-            topic_partition=TopicPartition(topic="t", partition=0),
-        )
-    )
-
-    tasks: typing.Final = _LoopTasks(
-        queue_get_task=done_future,  # ty: ignore[invalid-argument-type]
-        flush_wait_task=asyncio.create_task(asyncio.sleep(10)),  # ty: ignore[invalid-argument-type]
-        task_completed_wait_task=asyncio.create_task(asyncio.sleep(10)),  # ty: ignore[invalid-argument-type]
-    )
-
-    committer._flush_batch_event.set()
-    # drain_queue=True with an already-done queue_get_task must not raise and must not
-    # cancel the task (it is already done — calling .cancel() on a done future is a no-op,
-    # but the branch assert proves the if-not-done guard works).
-    committer._handle_flush_fired(tasks, drain_queue=True)
-
-    # The flush event must be cleared and a fresh flush_wait_task created.
-    assert not committer._flush_batch_event.is_set()
-
-    # Cleanup outstanding tasks.
-    tasks.cancel_outstanding()
