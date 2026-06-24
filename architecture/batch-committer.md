@@ -5,6 +5,22 @@ a background asyncio task launched via `spawn()`. Its streaming loop continuousl
 absorbs `KafkaCommitTask`s from an internal queue and commits each partition's
 contiguous-done prefix as offsets become eligible.
 
+The loop is split into two collaborators. `_run_commit_process` is the **async
+driver**: it owns the `asyncio.wait` select over three wait-tasks (queue-get /
+flush-event / task-completed-event) and the queue, but delegates every
+when-to-commit decision to a pure synchronous `CommitScheduler`
+(`_commit_scheduler.py`). The driver feeds it observations via `evaluate(...)` and
+acts on the returned `Decision` (`should_commit` / `drain_queue_now` /
+`timeout_fired`); it never writes a decision field itself. After each commit round
+the driver calls `note_committed(...)` to settle the post-commit deadline reset and
+the flush-flag clear.
+
+`CommitScheduler` owns the timeout deadline, the flush lifecycle
+(`flush_in_progress`), and the shutdown lifecycle (`should_shutdown`). It is
+synchronous and I/O-free; the driver passes `now = loop.time()` in. The commit
+triggers are computed inside `CommitScheduler.evaluate` (see Commit triggers
+below).
+
 Per-partition pending state, the pending count, and cancellation watermarks are
 owned by a synchronous, I/O-free `PendingCommits` object (`_pending_state.py`).
 The committer keeps the queue, the backpressure ceiling
@@ -13,11 +29,16 @@ transient-`KafkaError` re-queue logic.
 
 ## Commit triggers
 
-A partition's ready prefix is committed when any of these fires:
+A partition's ready prefix is committed when any of these fires — all evaluated
+inside `CommitScheduler.evaluate`:
 
 - total pending tasks reach `commit_batch_size`;
 - the `commit_batch_timeout_sec` deadline elapses; or
 - `commit_all` or `close` sets the flush event.
+
+The driver reads `len(self._pending)` (the `__len__` exposed by `PendingCommits`)
+and passes it to `evaluate`; the scheduler decides whether `take_ready()` should
+be called.
 
 ## Per-partition prefix extraction
 
@@ -32,10 +53,6 @@ A **cancelled** task is a hard boundary. The cancelled task and everything after
 it on that partition is dropped from pending, and `map_offsets_per_partition`
 (also in `_pending_state`) stops the offset advance at the cancelled task. Those
 offsets stay uncommitted and get redelivered on restart (at-least-once).
-
-The trigger decision (whether to call `take_ready()` at all) stays in the
-committer's loop, which reads `len(self._pending)` — the `__len__` exposed by
-`PendingCommits`.
 
 ## Committing
 

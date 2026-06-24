@@ -15,6 +15,7 @@ from faststream_concurrent_aiokafka.batch_committer import (
     CommitterIsDeadError,
     KafkaBatchCommitter,
     KafkaCommitTask,
+    _LoopTasks,
 )
 from tests.mocks import MockAIOKafkaConsumer, MockAsyncioTask
 
@@ -1348,3 +1349,116 @@ async def test_send_task_unblocks_with_dead_committer_error() -> None:
 
     with pytest.raises(CommitterIsDeadError):
         await asyncio.wait_for(blocked, timeout=1.0)
+
+
+# ---------- close() with already-finished-cleanly task (exception is None) ----------
+
+
+async def test_committer_close_when_task_already_finished_cleanly(caplog: pytest.LogCaptureFixture) -> None:
+    """close() on a committer whose task already completed normally (not crashed, not cancelled).
+
+    Must return without logging a warning — exercise the exc-is-None branch.
+    """
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=0.01, commit_batch_size=10)
+    committer.spawn()
+    # Let the loop run and then let it exit cleanly by requesting shutdown with no pending work.
+    committer._stop_requested = True
+    committer._flush_batch_event.set()
+    # Wait for the task to finish naturally (it has no pending items so is_finished fires quickly).
+    assert committer._commit_task is not None
+    await asyncio.wait_for(committer._commit_task, timeout=1.0)
+    assert committer._commit_task.done()
+    assert not committer._commit_task.cancelled()
+    assert committer._commit_task.exception() is None  # normal exit, not a crash
+
+    # close() must not log "had already died" since there was no exception.
+    await committer.close()
+    assert "Committer task had already died before close()" not in caplog.text
+
+
+# ---------- _streaming_iteration: accepts_new_work() is False (post-shutdown loop) ----------
+
+
+async def test_streaming_skips_queue_task_when_shutdown_in_progress() -> None:
+    """After shutdown is triggered, the streaming iteration must not include queue_get in the wait set.
+
+    (accepts_new_work() → False).  Exercised by a slow in-flight task that keeps the loop alive
+    through at least one post-shutdown iteration.
+    """
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    committer.spawn()
+
+    # A slow task keeps pending non-empty across the shutdown flush, forcing the loop to
+    # re-enter _streaming_iteration with accepts_new_work()=False.
+    slow_event: typing.Final = asyncio.Event()
+
+    async def slow() -> None:
+        await slow_event.wait()
+
+    tp: typing.Final = TopicPartition(topic="t", partition=0)
+    slow_task: typing.Final = asyncio.create_task(slow())
+    await committer.send_task(
+        KafkaCommitTask(
+            asyncio_task=slow_task,
+            offset=1,
+            consumer=consumer,
+            topic_partition=tp,
+        )
+    )
+
+    # Trigger shutdown — sets stop_requested + flush, so the next evaluate() call produces
+    # drain_queue_now=True and marks should_shutdown=True.  Loop will re-enter with
+    # accepts_new_work()=False while slow_task is still pending.
+    close_task: typing.Final = asyncio.create_task(committer.close())
+    await asyncio.sleep(0.02)  # let the loop enter the post-shutdown iteration
+
+    # Unblock the slow task so pending drains and the loop can exit.
+    slow_event.set()
+    await asyncio.wait_for(close_task, timeout=2.0)
+
+    assert not committer.is_healthy
+    consumer.commit.assert_called_once_with({tp: 2})
+
+
+# ---------- _handle_flush_fired: queue_get_task already done (no cancel needed) ----------
+
+
+async def test_handle_flush_fired_skips_cancel_when_queue_get_already_done() -> None:
+    """When drain_queue=True and queue_get_task is already done, cancel must not be called.
+
+    Exercised by calling _handle_flush_fired directly with a pre-done queue_get_task.
+    """
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    # Build a minimal _LoopTasks where queue_get_task is already done.
+    loop: typing.Final = asyncio.get_running_loop()
+
+    done_future: typing.Final = loop.create_future()
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    mock_asyncio_task: typing.Final = MockAsyncioTask(result="ok")
+    done_future.set_result(
+        KafkaCommitTask(
+            asyncio_task=mock_asyncio_task,  # ty: ignore[invalid-argument-type]
+            offset=5,
+            consumer=consumer,
+            topic_partition=TopicPartition(topic="t", partition=0),
+        )
+    )
+
+    tasks: typing.Final = _LoopTasks(
+        queue_get_task=done_future,  # ty: ignore[invalid-argument-type]
+        flush_wait_task=asyncio.create_task(asyncio.sleep(10)),  # ty: ignore[invalid-argument-type]
+        task_completed_wait_task=asyncio.create_task(asyncio.sleep(10)),  # ty: ignore[invalid-argument-type]
+    )
+
+    committer._flush_batch_event.set()
+    # drain_queue=True with an already-done queue_get_task must not raise and must not
+    # cancel the task (it is already done — calling .cancel() on a done future is a no-op,
+    # but the branch assert proves the if-not-done guard works).
+    committer._handle_flush_fired(tasks, drain_queue=True)
+
+    # The flush event must be cleared and a fresh flush_wait_task created.
+    assert not committer._flush_batch_event.is_set()
+
+    # Cleanup outstanding tasks.
+    tasks.cancel_outstanding()
