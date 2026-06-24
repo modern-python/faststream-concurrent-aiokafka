@@ -1,12 +1,12 @@
 ---
-status: draft
+status: shipped
 date: 2026-06-24
 slug: commit-scheduler-deep-module
 summary: Extract the streaming loop's when-to-commit decision state into a pure synchronous CommitScheduler; the committer keeps the async driver.
 supersedes: null
 superseded_by: null
-pr: null
-outcome: null
+pr: "40"
+outcome: "PR #40 opened; merge pending CI's full Redpanda gate on HEAD (Docker outage blocked the local re-run of the no-op follow-up commit). Behavioural commit d1dc6a8 verified green at 138/138 on real Redpanda; e6183c9 at 141/141 @ 100%."
 ---
 
 # Design: Extract the commit-timing decisions into `CommitScheduler`
