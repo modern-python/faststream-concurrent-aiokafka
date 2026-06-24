@@ -7,7 +7,7 @@ import typing
 from aiokafka.errors import CommitFailedError, IllegalStateError, KafkaError
 from faststream.kafka import TopicPartition
 
-from faststream_concurrent_aiokafka import _pending_state, consts
+from faststream_concurrent_aiokafka import _commit_scheduler, _pending_state, consts
 from faststream_concurrent_aiokafka._pending_state import KafkaCommitTask
 
 
@@ -18,28 +18,12 @@ class CommitterIsDeadError(Exception): ...
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
-class _StreamingState:
-    """Mutable state for the streaming committer loop.
-
-    Invariants maintained by `_streaming_iteration`:
-      * `pending` empty ⇒ `timeout_deadline is None`.
-      * `flush_in_progress` is set only when a flush event fired *without*
-        `_stop_requested`; cleared once `pending` drains.
-      * `should_shutdown` is set only when a flush event fired *with*
-        `_stop_requested`; once set, the loop exits as soon as `pending`
-        drains.
-    """
+class _LoopTasks:
+    """The three asyncio wait-tasks the streaming select multiplexes."""
 
     queue_get_task: asyncio.Task[KafkaCommitTask]
     flush_wait_task: asyncio.Task[bool]
     task_completed_wait_task: asyncio.Task[bool]
-    # Absolute loop-time deadline for the next commit_batch_timeout firing. None when pending
-    # is empty (no timer needed). Passed as `timeout=` to asyncio.wait — no Task allocation.
-    timeout_deadline: float | None = None
-    should_shutdown: bool = False
-    # Active commit_all (flush event seen, _stop_requested is False): keep committing every
-    # iteration until pending drains, so messages_queue.join() can return.
-    flush_in_progress: bool = False
 
     def cancel_outstanding(self) -> None:
         for task in (self.queue_get_task, self.flush_wait_task, self.task_completed_wait_task):
@@ -64,11 +48,13 @@ class KafkaBatchCommitter:
         self._task_completed_event = asyncio.Event()
         self._stop_requested: bool = False
 
-        self._commit_batch_timeout_sec = commit_batch_timeout_sec
-        self._commit_batch_size = commit_batch_size
         self._shutdown_timeout = shutdown_timeout_sec
         # Owns per-partition pending commit tasks, count, and cancellation watermarks.
         self._pending: typing.Final = _pending_state.PendingCommits()
+        self._scheduler: typing.Final = _commit_scheduler.CommitScheduler(
+            commit_batch_size=commit_batch_size,
+            commit_batch_timeout_sec=commit_batch_timeout_sec,
+        )
 
         # Backpressure: count of tasks admitted via send_task but not yet finally
         # committed/dropped (in _messages_queue + pending). When it reaches the
@@ -131,79 +117,81 @@ class KafkaBatchCommitter:
         return all(results)
 
     async def _run_commit_process(self) -> None:
-        # Streaming committer: one loop continuously absorbs queue items into per-partition
-        # pending state and commits each partition's contiguous-done prefix when total pending
-        # crosses commit_batch_size, when the timeout fires, or when commit_all/close sets the
-        # flush event. Queue depth no longer correlates with stuck-batch wait time.
-        state: typing.Final = _StreamingState(
+        tasks: typing.Final = _LoopTasks(
             queue_get_task=asyncio.create_task(self._messages_queue.get()),
             flush_wait_task=asyncio.create_task(self._flush_batch_event.wait()),
             task_completed_wait_task=asyncio.create_task(self._task_completed_event.wait()),
         )
-
         try:
-            while not (state.should_shutdown and not self._pending):
-                await self._streaming_iteration(state)
+            while not self._scheduler.is_finished(pending_empty=not self._pending):
+                await self._streaming_iteration(tasks)
         finally:
-            state.cancel_outstanding()
+            tasks.cancel_outstanding()
             self._uncommitted_drained.set()
 
-    async def _streaming_iteration(self, state: "_StreamingState") -> None:
-        wait_targets: list[asyncio.Future[typing.Any]] = [
-            state.flush_wait_task,
-            state.task_completed_wait_task,
-        ]
-        if not state.should_shutdown:
-            wait_targets.append(state.queue_get_task)
-
+    async def _streaming_iteration(self, tasks: "_LoopTasks") -> None:
         loop: typing.Final = asyncio.get_running_loop()
-        remaining: float | None = None
-        if state.timeout_deadline is not None:
-            remaining = max(state.timeout_deadline - loop.time(), 0.0)
 
+        wait_targets: list[asyncio.Future[typing.Any]] = [
+            tasks.flush_wait_task,
+            tasks.task_completed_wait_task,
+        ]
+        if self._scheduler.accepts_new_work():
+            wait_targets.append(tasks.queue_get_task)
+
+        remaining: typing.Final = self._scheduler.wait_timeout(loop.time())
         await asyncio.wait(wait_targets, return_when=asyncio.FIRST_COMPLETED, timeout=remaining)
 
-        # Capture once after the wait — clock may have advanced past the deadline even if no
-        # future fired (the asyncio.wait timeout is what made us return).
+        # Capture once after the wait — used for both the deadline arm and timeout_fired.
         now: typing.Final = loop.time()
 
-        if not state.should_shutdown and state.queue_get_task.done():
-            new_ct = state.queue_get_task.result()
+        absorbed: typing.Final = self._scheduler.accepts_new_work() and tasks.queue_get_task.done()
+        if absorbed:
+            new_ct = tasks.queue_get_task.result()
             self._track_user_task(new_ct)
             self._pending.absorb(new_ct)
-            state.queue_get_task = asyncio.create_task(self._messages_queue.get())
-            if state.timeout_deadline is None:
-                state.timeout_deadline = now + self._commit_batch_timeout_sec
+            tasks.queue_get_task = asyncio.create_task(self._messages_queue.get())
 
-        # Re-arm completion event before extract, so any task finishing during extract is
-        # captured by the next iteration instead of being lost between clear and re-wait.
-        if state.task_completed_wait_task.done():
+        # Re-arm the completion event before deciding, so a task finishing during this
+        # iteration is captured next time instead of being lost between clear and re-wait.
+        if tasks.task_completed_wait_task.done():
             self._task_completed_event.clear()
-            state.task_completed_wait_task = asyncio.create_task(self._task_completed_event.wait())
+            tasks.task_completed_wait_task = asyncio.create_task(self._task_completed_event.wait())
 
-        timeout_fired: typing.Final = state.timeout_deadline is not None and now >= state.timeout_deadline
-        flush_fired: typing.Final = state.flush_wait_task.done()
+        flush_fired: typing.Final = tasks.flush_wait_task.done()
+
+        decision: typing.Final = self._scheduler.evaluate(
+            now=now,
+            absorbed=absorbed,
+            flush_fired=flush_fired,
+            stop_requested=self._stop_requested,
+            pending_len=len(self._pending),
+        )
 
         if flush_fired:
-            self._handle_flush_fired(state)
+            self._handle_flush_fired(tasks, drain_queue=decision.drain_queue_now)
 
-        ready: typing.Final = await self._maybe_commit(state, timeout_fired)
-        if state.flush_in_progress and not self._pending:
-            state.flush_in_progress = False
+        committed = False
+        if decision.should_commit:
+            ready = self._pending.take_ready()
+            if ready:
+                await self._commit_ready(ready)
+                committed = True
 
-        # Reset the deadline after any commit OR on timeout firing. Let it tick otherwise.
-        # Invariant: pending empty ⇒ timeout_deadline is None.
-        if ready or timeout_fired:
-            state.timeout_deadline = (loop.time() + self._commit_batch_timeout_sec) if self._pending else None
+        self._scheduler.note_committed(
+            now=loop.time(),
+            committed=committed,
+            timeout_fired=decision.timeout_fired,
+            pending_empty=not self._pending,
+        )
 
-    def _handle_flush_fired(self, state: "_StreamingState") -> None:
-        if self._stop_requested:
-            state.should_shutdown = True
+    def _handle_flush_fired(self, tasks: "_LoopTasks", *, drain_queue: bool) -> None:
+        if drain_queue:
             # Drain anything still buffered in messages_queue into pending so close()
-            # can commit it. Without this, items put before close() but not yet absorbed
-            # by queue_get would be silently dropped (offsets stay uncommitted; redelivered
-            # on restart, but commit_all/close() callers expect everything enqueued to be
-            # processed).
+            # can commit it. Without this, items put before close() but not yet
+            # absorbed by queue_get would be silently dropped (offsets stay
+            # uncommitted; redelivered on restart, but close() callers expect
+            # everything enqueued to be processed).
             while True:
                 try:
                     ct = self._messages_queue.get_nowait()
@@ -211,26 +199,10 @@ class KafkaBatchCommitter:
                     break
                 self._track_user_task(ct)
                 self._pending.absorb(ct)
-            if not state.queue_get_task.done():
-                state.queue_get_task.cancel()
-        else:
-            state.flush_in_progress = True
+            if not tasks.queue_get_task.done():
+                tasks.queue_get_task.cancel()
         self._flush_batch_event.clear()
-        state.flush_wait_task = asyncio.create_task(self._flush_batch_event.wait())
-
-    async def _maybe_commit(self, state: "_StreamingState", timeout_fired: bool) -> list[_pending_state.ReadyCommit]:
-        commit_triggered: typing.Final = (
-            len(self._pending) >= self._commit_batch_size
-            or timeout_fired
-            or state.flush_in_progress
-            or state.should_shutdown
-        )
-        if not commit_triggered:
-            return []
-        ready_commits: typing.Final = self._pending.take_ready()
-        if ready_commits:
-            await self._commit_ready(ready_commits)
-        return ready_commits
+        tasks.flush_wait_task = asyncio.create_task(self._flush_batch_event.wait())
 
     async def commit_all(self, flush_timeout_sec: float = consts.DEFAULT_REBALANCE_FLUSH_TIMEOUT_SEC) -> None:
         """Flush and commit pending tasks without stopping the committer loop.
