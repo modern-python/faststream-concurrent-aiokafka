@@ -102,3 +102,63 @@ def map_offsets_per_partition(
         # Kafka commits the *next* offset to fetch, so committed = processed_max + 1
         partitions_to_offsets[partition] = max_offset + 1
     return partitions_to_offsets
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ReadyCommit:
+    # consumer typed Any to match KafkaCommitTask.consumer (avoids importing aiokafka at runtime)
+    consumer: typing.Any
+    offsets: dict[TopicPartition, int]
+    tasks: list[KafkaCommitTask]
+
+
+class PendingCommits:
+    """Owns per-partition pending commit tasks, pending count, cancellation watermarks, and partition owners.
+
+    Synchronous and single-owner: the committer's streaming loop is the sole
+    mutator, so no locking is needed. Reads asyncio task state (done/cancelled)
+    but never awaits and never performs I/O.
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[TopicPartition, list[KafkaCommitTask]] = {}
+        self._count: int = 0
+        self._watermarks: dict[tuple[int, TopicPartition], int] = {}
+        self._partition_owner: dict[TopicPartition, int] = {}
+
+    def __len__(self) -> int:
+        return self._count
+
+    def absorb(self, ct: KafkaCommitTask) -> None:
+        insert_sorted(self._pending.setdefault(ct.topic_partition, []), ct)
+        self._partition_owner[ct.topic_partition] = id(ct.consumer)
+        self._count += 1
+
+    def take_ready(self) -> list[ReadyCommit]:
+        # Extract each partition's contiguous-done prefix (cancelled = hard
+        # boundary), then group by consumer and apply the watermark floor.
+        # Atomic and synchronous: pending + watermark mutation both happen here,
+        # before any I/O the committer performs on the returned offsets.
+        ready, ready_count = extract_ready_prefixes(self._pending)
+        self._count -= ready_count
+        flat: list[KafkaCommitTask] = [t for tasks in ready.values() for t in tasks]
+        if not flat:
+            return []
+        by_consumer: dict[int, list[KafkaCommitTask]] = {}
+        for task in flat:
+            by_consumer.setdefault(id(task.consumer), []).append(task)
+        result: list[ReadyCommit] = []
+        for consumer_id, tasks in by_consumer.items():
+            offsets = map_offsets_per_partition(consumer_id, tasks, self._watermarks)
+            result.append(ReadyCommit(consumer=tasks[0].consumer, offsets=offsets, tasks=tasks))
+        return result
+
+    def clear_watermarks(self, partitions: typing.Iterable[TopicPartition] | None = None) -> None:
+        if partitions is None:
+            self._watermarks.clear()
+            self._partition_owner.clear()
+            return
+        for partition in partitions:
+            owner = self._partition_owner.pop(partition, None)
+            if owner is not None:
+                self._watermarks.pop((owner, partition), None)

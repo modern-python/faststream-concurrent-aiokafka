@@ -4,6 +4,10 @@ import contextlib
 import typing
 from unittest.mock import AsyncMock, Mock
 
+from faststream.kafka import TopicPartition
+
+from faststream_concurrent_aiokafka._pending_state import KafkaCommitTask
+
 
 class MockAIOKafkaConsumer:
     def __init__(self, group_id: str = "test-group") -> None:
@@ -65,6 +69,22 @@ class MockKafkaBatchCommitter:
     @property
     def is_healthy(self) -> bool:
         return self._healthy
+
+
+def make_commit_task(
+    consumer: MockAIOKafkaConsumer,
+    topic_partition: TopicPartition,
+    offset: int,
+    *,
+    done: bool = False,
+    cancelled: bool = False,
+) -> KafkaCommitTask:
+    return KafkaCommitTask(
+        asyncio_task=MockAsyncioTask(result="ok", done=done, cancelled=cancelled),  # ty: ignore[invalid-argument-type]
+        topic_partition=topic_partition,
+        offset=offset,
+        consumer=consumer,
+    )
 
 
 _DEFAULT_MESSAGE: typing.Final = object()
