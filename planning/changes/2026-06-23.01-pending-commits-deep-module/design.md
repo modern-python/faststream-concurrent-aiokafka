@@ -6,7 +6,7 @@ summary: Extract pending/watermark state into a synchronous PendingCommits modul
 supersedes: null
 superseded_by: null
 pr: "39"
-outcome: "PR #39 opened; merge pending the full Redpanda integration gate in CI (could not re-run locally — Docker outage). Behavioural commit 5048785 verified green at 126/126 @ 100%."
+outcome: "Merged as #39 (squash 3167489). Full suite green on real Redpanda in CI across Python 3.11–3.14 at 100% coverage."
 ---
 
 # Design: Give pending-commit bookkeeping a home (`PendingCommits`)
