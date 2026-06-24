@@ -1,9 +1,9 @@
 ---
-status: draft
+status: shipped
 date: 2026-06-23
 slug: pending-commits-deep-module
 spec: pending-commits-deep-module
-pr: null
+pr: "39"
 ---
 
 # pending-commits-deep-module — implementation plan

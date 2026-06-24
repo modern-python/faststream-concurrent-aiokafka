@@ -1,12 +1,12 @@
 ---
-status: draft
+status: shipped
 date: 2026-06-23
 slug: pending-commits-deep-module
-summary: Extract pending/watermark/owner state into a synchronous PendingCommits module; delete the committer's static test-handle delegators.
+summary: Extract pending/watermark state into a synchronous PendingCommits module; delete the committer's static test-handle delegators.
 supersedes: null
 superseded_by: null
-pr: null
-outcome: null
+pr: "39"
+outcome: "PR #39 opened; merge pending the full Redpanda integration gate in CI (could not re-run locally — Docker outage). Behavioural commit 5048785 verified green at 126/126 @ 100%."
 ---
 
 # Design: Give pending-commit bookkeeping a home (`PendingCommits`)
