@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-23
-slug: pending-commits-deep-module
 summary: Extract pending/watermark state into a synchronous PendingCommits module; delete the committer's static test-handle delegators.
-supersedes: null
-superseded_by: null
-pr: "39"
-outcome: "Merged as #39 (squash 3167489). Full suite green on real Redpanda in CI across Python 3.11–3.14 at 100% coverage."
 ---
 
 # Design: Give pending-commit bookkeeping a home (`PendingCommits`)

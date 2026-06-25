@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-13
-slug: portable-planning-convention
 summary: Adopt the portable two-axis convention: `architecture/` truth home + `changes/` bundles, fresh Index.
-supersedes: null
-superseded_by: null
-pr: "34"
-outcome: "ships in #34; defines the convention, no architecture/ promotion applies"
 ---
 
 # Design: Adopt the portable OpenSpec-shaped planning convention

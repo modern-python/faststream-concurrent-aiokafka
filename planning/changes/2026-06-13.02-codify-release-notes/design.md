@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-13
-slug: codify-release-notes
 summary: Codify `planning/releases/` as a workflow step; add the release-notes template.
-supersedes: null
-superseded_by: null
-pr: "33"
-outcome: "merged as #33"
 ---
 
 # Codify `planning/releases/` as a workflow step
