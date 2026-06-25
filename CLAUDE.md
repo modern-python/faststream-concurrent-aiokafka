@@ -4,79 +4,69 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-```bash
-just install      # lock + sync all deps (run after pulling or changing pyproject.toml)
-just lint         # eof-fixer, ruff format, ruff check --fix, ty check
-just lint-ci      # same but no auto-fix (used in CI)
-just build        # build the application Docker image
-just test         # run all tests in Docker (starts Redpanda, runs pytest, tears down)
-just test-branch  # same with branch coverage
-just down         # tear down all containers
-just publish      # bump version to $GITHUB_REF_NAME, build, publish to PyPI
-```
+`just --list` is the source of truth; run `just install` after pulling or
+changing `pyproject.toml`. Non-obvious notes:
 
-Run a single test file or test by name:
-```bash
-uv run --no-sync pytest tests/test_kafka_committer.py
-uv run --no-sync pytest -k test_committer_logs_task_exceptions
-```
+- `just test` / `just test-branch` run in Docker (start Redpanda, run pytest,
+  tear down) — they require Docker.
+- Run one test without Docker via the already-running stack:
+  `uv run --no-sync pytest tests/test_kafka_committer.py -k <name>`.
+- `just lint` auto-fixes; `just lint-ci` is the check-only CI variant (and runs
+  the planning validator).
 
 ## Workflow
 
-Per-feature: brainstorming → spec in `planning/changes/YYYY-MM-DD.NN-<slug>/design.md` → writing-plans → plan in `planning/changes/YYYY-MM-DD.NN-<slug>/plan.md` → executing-plans / subagent-driven-development → requesting-code-review → finishing-a-development-branch. Each change is a folder bundle; `<slug>` is a kebab-case description, not a story ID; `.NN` is a zero-padded intra-day counter that breaks same-date ties so the timeline sorts stably. The implementing PR sets `status: shipped` and fills `pr` / `outcome` in the branch, alongside the code and promotes its conclusions into the affected `architecture/<capability>.md` — that hand-edit keeps `architecture/` true and is the only ship-time step; there is no folder move. The change listing is generated — run `just index`. A design decision taken without a code change — especially a candidate rejected with a load-bearing reason — is recorded as `planning/decisions/YYYY-MM-DD-<slug>.md` (the `decision.md` template, frontmatter `status: accepted|superseded`), each with a **Revisit trigger** so future reviews don't re-litigate it; listed by `just index`. See [`planning/README.md`](planning/README.md) for the conventions and [`planning/_templates/`](planning/_templates/) for copy-and-fill starting points.
-
-**Spec** (`design.md`) captures the *thinking* — why, what the design is, trade-offs, scope. Written before code; rarely revised after merge. **Plan** (`plan.md`) captures the *sequencing* — the ordered checklist an executor walks; references the spec for the "why". **`architecture/`** captures the *invariants* of shipped systems — the living truth, promoted in the implementing PR alongside the code. A plan paragraph that would still read correctly with all task numbers and checkboxes removed is design content and belongs in the spec.
-
-**Three lanes.** Scale the artifact to the change. **Full** — a `design.md` + `plan.md` bundle — for real design judgment, a new file/module, a public-API change, cross-cutting/multi-file work, or non-trivial test design. **Lightweight** — a single `change.md` — for small-but-real changes (≲30 LOC net, ≤2 files, no new file, no public-API change, a single straightforward test). **Tiny** — no bundle, just a conventional commit — for a typo, dep bump, linter/formatter/CI tweak, a mechanical rename, or a single-line config change. Heavier lane wins on ambiguity; a `change.md` that outgrows its lane splits into `design.md` + `plan.md`.
-
-Release notes are written when cutting a release (not per-feature): copy `planning/releases/TEMPLATE.md` to `planning/releases/<version>.md` (bare version, no `v` prefix) and link back to the driving change bundle under `planning/changes/`.
+Planning uses a portable two-axis convention: `architecture/` (repo root) is the
+living **truth home** and promotion target; `planning/changes/` holds the
+per-change bundles. **Start at the Quick path** in
+[`planning/README.md`](planning/README.md) to choose a lane (Full / Lightweight
+/ Tiny), create a bundle, and ship — that file is the authoritative spec. Run
+`just check-planning` to validate bundles and `just index` to print the listing.
+Release notes: copy `planning/releases/TEMPLATE.md` to
+`planning/releases/<version>.md` (bare version, no `v` prefix) when cutting a
+release.
 
 ## Architecture
 
-The library provides concurrent Kafka message processing for FastStream. Modules:
+The library provides concurrent Kafka message processing for FastStream. The
+authoritative, code-current account of each capability lives in
+[`architecture/`](architecture/). **When a change alters a capability's
+behavior, update the matching `architecture/<capability>.md` in the same PR** —
+that promotion is what keeps `architecture/` true.
 
-**`processing.py` — `KafkaConcurrentHandler`**
-The core engine. One handler is created per `initialize_concurrent_processing` call and stored in FastStream's `ContextRepo` under the key `"concurrent_processing"`. It is *not* a singleton — calling `stop_concurrent_processing` clears the context entry so a fresh handler can be initialised. The handler manages:
-- An `asyncio.Semaphore` for concurrency limiting (minimum: 1)
-- A `set[asyncio.Task]` (`_tracked_tasks`) holding in-flight user tasks; the per-task done-callback (`_finish_task`) releases the semaphore and removes the task from the set
-- A `KafkaBatchCommitter` for offset commits
+Invariants (what must not break):
 
-Key design: `handle_task()` fires-and-forgets the user coroutine as an asyncio task and enqueues a `KafkaCommitTask` on the committer. Offsets are not committed until the user task finishes (at-least-once semantics).
+- **At-least-once offsets.** Offsets are committed only *after* the user task
+  finishes; a crash, cancellation, or rebalance before completion leaves the
+  offset uncommitted so the message is redelivered. A cancelled task is a hard
+  offset boundary — cancelled-and-after offsets on its partition stay
+  uncommitted.
+- **One handler per init, not a singleton.** A handler lives in `ContextRepo`
+  under `"concurrent_processing"`; `stop_concurrent_processing` clears it so a
+  fresh handler can be initialised. Lifecycle is owned by whoever calls
+  init/stop — no module-level state, no signal handlers.
+- **Middleware gates on manual acks.** It passes through FakeConsumer and
+  non-MANUAL-ack subscribers, refuses `_enable_auto_commit=True`, rejects batch
+  subscribers, and skips (logs, leaves offset uncommitted) once the handler is
+  stopped. The `_classify(...) -> _Route` branch *order* is load-bearing.
+- **Bounded shutdown / rebalance flush.** Shutdown is bounded by the committer's
+  `shutdown_timeout_sec` (default 20 s); the rebalance listener's `commit_all`
+  flush is bounded by `flush_timeout_sec` (default 10 s, well under aiokafka's
+  300 s `max.poll.interval.ms`).
+- **Real-broker tests.** Integration tests drive a real Redpanda container; the
+  FastStream/aiokafka harness invariants (start subscribers explicitly,
+  `auto_offset_reset="earliest"`, pre-create topics, etc.) are load-bearing.
 
-`stop()` cancels every in-flight tracked task, then awaits `committer.close()`. The committer treats cancelled tasks as a hard offset boundary (see `batch_committer.py`), so cancelled-and-after offsets stay uncommitted and get redelivered on restart. Total wall-clock for shutdown is bounded by the committer's own `shutdown_timeout_sec` (default 20 s) and is sub-second in normal conditions. The handler does *not* install signal handlers — shutdown is driven by the FastStream lifespan calling `stop_concurrent_processing`.
+| Capability | File |
+|---|---|
+| `KafkaConcurrentHandler` (`processing.py`) — engine, dispatch, shutdown | [`architecture/concurrent-handler.md`](architecture/concurrent-handler.md) |
+| `KafkaBatchCommitter` (`batch_committer.py`) — offset-commit task | [`architecture/batch-committer.md`](architecture/batch-committer.md) |
+| Middleware, init/stop lifecycle, healthcheck (`middleware.py`, `healthcheck.py`) | [`architecture/middleware-lifecycle.md`](architecture/middleware-lifecycle.md) |
+| `ConsumerRebalanceListener` (`rebalance.py`) | [`architecture/rebalance.md`](architecture/rebalance.md) |
+| Real-broker integration-test harness (`tests/test_integration.py`) | [`architecture/integration-tests.md`](architecture/integration-tests.md) |
 
-**`middleware.py` — FastStream middleware + lifecycle functions**
-- `KafkaConcurrentProcessingMiddleware`: FastStream `BaseMiddleware` subclass. Its `consume_scope` retrieves the handler from `self.context`. It passes through (a) FakeConsumer (TestKafkaBroker) and (b) any subscriber whose ack policy is not MANUAL (`kafka_message.committed is not None`). It refuses if `_enable_auto_commit=True` on the consumer. If the handler has been stopped, it logs a warning and skips the message (the offset stays uncommitted, so the message is redelivered on restart).
-- `initialize_concurrent_processing(context, ...)`: create and start a handler, store it in context.
-- `stop_concurrent_processing(context)`: gates on `is_running`; calls `handler.stop()` and clears the context entry. Safe to call when the committer task has already died — `KafkaBatchCommitter.close()` early-returns on a `done()` task and logs any exception.
-
-**`healthcheck.py` — `is_kafka_handler_healthy`**
-A single function that accepts a `ContextRepo` and returns `True` if the handler is present and `is_healthy` (i.e. `_is_running` AND committer task alive). Intended for readiness/liveness probes.
-
-**`batch_committer.py` — `KafkaBatchCommitter`**
-Runs as a background asyncio task (`spawn()`). Streaming loop: continuously absorbs `KafkaCommitTask`s from the queue into per-partition pending state, watches the head not-done task per partition, and commits each partition's contiguous-done prefix when total pending ≥ `commit_batch_size`, when `commit_batch_timeout_sec` fires, or when `commit_all`/`close` sets the flush event. Per partition, `_extract_ready_prefixes` sorts by offset (tolerates re-queued tasks landing out of order) and stops at the first not-done task; a cancelled task is a hard boundary — cancelled + everything after is dropped from pending while `_map_offsets_per_partition` stops the offset advance at the cancelled task (so uncommitted offsets get redelivered on restart, at-least-once). Per consumer-id group, commits via `consumer.commit({TopicPartition: max_offset+1})`. Transient `KafkaError` re-queues the batch; `CommitFailedError`/`IllegalStateError` (rebalance/revocation) discards it. `CommitterIsDeadError` is raised to callers when the committer's main task has died, which triggers `handler.stop()`.
-
-**`rebalance.py` — `ConsumerRebalanceListener`**
-Returned by `handler.create_rebalance_listener()`. On `on_partitions_revoked`, calls `committer.commit_all()` so offsets are flushed before the partition is reassigned, preventing duplicate processing after rebalance.
-
-## Key patterns
+## Conventions
 
 - **Type suppression**: use `# ty: ignore[rule-name]` (not `# type: ignore`).
 - **No `from __future__ import annotations`**: annotations are evaluated eagerly; `typing.Self`/`typing.Never` are used directly (requires Python ≥ 3.11).
 - **Imports at module level**: no local imports inside functions.
-
-## Integration tests
-
-`tests/test_integration.py` runs against a real Redpanda container (Kafka-compatible, lightweight) via `testcontainers[kafka]`. The container is session-scoped — one instance for the whole test run.
-
-**Running integration tests** requires Docker — they run automatically as part of `just test`.
-
-**Key findings from building these tests:**
-
-- `async with KafkaBroker():` only calls `connect()`, which sets up the producer. It does **not** start subscribers. You must also call `await broker.start()` explicitly to launch the consumer poll tasks.
-- Always use `auto_offset_reset="earliest"` on test subscribers. The default `"latest"` causes the consumer to miss messages published before it gets its partition assignment.
-- Pre-create topics with `AIOKafkaAdminClient` before starting the broker. Auto-creation on first publish triggers a `NotLeaderForPartitionError` retry loop that can outlast short sleeps.
-- After `await broker.start()`, sleep ~1.5 s before publishing to let the consumer join the group and receive partition assignments.
-- `AsgiFastStream` lifespan tests must use `async with app.start_lifespan_context()` — calling `app.start()` / `app.stop()` bypasses the `lifespan` context manager entirely.
-- `AsgiFastStream` injects its own app-level `ContextRepo` into the lifespan, separate from `broker.context`. Pass `broker.context` explicitly to `initialize_concurrent_processing` and `stop_concurrent_processing`.
-- Subscriber-level `middlewares` on `@broker.subscriber(...)` takes `SubscriberMiddleware` (a plain `(call_next, msg)` callable), not `BaseMiddleware` subclasses. To scope `KafkaConcurrentProcessingMiddleware` to a subset of subscribers, use `KafkaRouter(middlewares=[KafkaConcurrentProcessingMiddleware])` and `broker.include_router(router)`.

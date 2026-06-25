@@ -1,11 +1,6 @@
 ---
 status: accepted
-date: 2026-06-24
-slug: batch-subscribers-unsupported
 summary: Batch subscribers (batch=True) are deliberately unsupported; the middleware rejects them with a clear RuntimeError.
-supersedes: null
-superseded_by: null
-pr: null
 ---
 
 # Batch subscribers (`batch=True`) are unsupported

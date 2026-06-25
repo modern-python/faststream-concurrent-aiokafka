@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-24
-slug: commit-scheduler-deep-module
 summary: Extract the streaming loop's when-to-commit decision state into a pure synchronous CommitScheduler; the committer keeps the async driver.
-supersedes: null
-superseded_by: null
-pr: "40"
-outcome: "Merged as #40 (squash d3aa133). Full suite green on real Redpanda in CI across Python 3.11–3.14 at 100% coverage."
 ---
 
 # Design: Extract the commit-timing decisions into `CommitScheduler`

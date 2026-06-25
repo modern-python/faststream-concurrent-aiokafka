@@ -1,11 +1,3 @@
----
-status: shipped
-date: 2026-06-23
-slug: pending-commits-deep-module
-spec: pending-commits-deep-module
-pr: "39"
----
-
 # pending-commits-deep-module — implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use

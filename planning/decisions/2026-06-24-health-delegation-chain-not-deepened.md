@@ -1,11 +1,6 @@
 ---
 status: accepted
-date: 2026-06-24
-slug: health-delegation-chain-not-deepened
 summary: Leave the is_kafka_handler_healthy → handler.is_healthy → committer.is_healthy chain as-is; not worth deepening yet.
-supersedes: null
-superseded_by: null
-pr: null
 ---
 
 # Health delegation chain left as-is (architecture candidate #4)

@@ -1,11 +1,3 @@
----
-status: shipped
-date: 2026-06-24
-slug: commit-scheduler-deep-module
-spec: commit-scheduler-deep-module
-pr: "40"
----
-
 # commit-scheduler-deep-module — implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use

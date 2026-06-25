@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-24
-slug: route-classify-extraction
 summary: Extract consume_scope's 8-branch message classification into a pure _classify(...) -> _Route; consume_scope becomes a precondition + match.
-supersedes: null
-superseded_by: null
-pr: "41"
-outcome: "Merged as #41 (squash 596b2d7). Full suite green on real Redpanda in CI across Python 3.11–3.14; middleware.py at 100% coverage. PR review added an assert_never exhaustiveness guard + test hardenings, no correctness findings."
 ---
 
 # Change: Lift the route decision out of `consume_scope`
