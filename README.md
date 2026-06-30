@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/faststream-concurrent-aiokafka.svg)](https://pypi.org/project/faststream-concurrent-aiokafka/)
 [![Supported Python versions](https://img.shields.io/pypi/pyversions/faststream-concurrent-aiokafka.svg)](https://pypi.org/project/faststream-concurrent-aiokafka/)
-[![Downloads](https://img.shields.io/pypi/dm/faststream-concurrent-aiokafka.svg)](https://pypistats.org/packages/faststream-concurrent-aiokafka)
+[![Downloads](https://static.pepy.tech/badge/faststream-concurrent-aiokafka/month)](https://pepy.tech/projects/faststream-concurrent-aiokafka)
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](https://github.com/modern-python/faststream-concurrent-aiokafka/actions/workflows/ci.yml)
 [![CI](https://github.com/modern-python/faststream-concurrent-aiokafka/actions/workflows/ci.yml/badge.svg)](https://github.com/modern-python/faststream-concurrent-aiokafka/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/modern-python/faststream-concurrent-aiokafka.svg)](https://github.com/modern-python/faststream-concurrent-aiokafka/blob/main/LICENSE)
