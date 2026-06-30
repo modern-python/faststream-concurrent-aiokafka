@@ -1,4 +1,10 @@
-# faststream-concurrent-aiokafka
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)"  srcset="https://raw.githubusercontent.com/modern-python/.github/main/brand/projects/faststream-concurrent-aiokafka/lockup-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/modern-python/.github/main/brand/projects/faststream-concurrent-aiokafka/lockup-light.svg">
+    <img alt="faststream-concurrent-aiokafka" src="https://raw.githubusercontent.com/modern-python/.github/main/brand/projects/faststream-concurrent-aiokafka/lockup.png" width="420">
+  </picture>
+</p>
 
 [![PyPI version](https://img.shields.io/pypi/v/faststream-concurrent-aiokafka.svg)](https://pypi.org/project/faststream-concurrent-aiokafka/)
 [![Supported Python versions](https://img.shields.io/pypi/pyversions/faststream-concurrent-aiokafka.svg)](https://pypi.org/project/faststream-concurrent-aiokafka/)
