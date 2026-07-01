@@ -37,8 +37,9 @@ index:
 check-planning:
     uv run python planning/index.py --check
 
+# Auth via PyPI Trusted Publishing (OIDC); uv publish auto-detects the CI id-token.
 publish:
     rm -rf dist
     uv version $GITHUB_REF_NAME
     uv build
-    uv publish --token $PYPI_TOKEN
+    uv publish
