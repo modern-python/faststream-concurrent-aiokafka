@@ -18,10 +18,10 @@ changing `pyproject.toml`. Non-obvious notes:
 
 Planning uses a portable two-axis convention: `architecture/` (repo root) is the
 living **truth home** and promotion target; `planning/changes/` holds the
-per-change bundles. **Start at the Quick path** in
+per-change files. **Start at the Quick path** in
 [`planning/README.md`](planning/README.md) to choose a lane (Full / Lightweight
-/ Tiny), create a bundle, and ship — that file is the authoritative spec. Run
-`just check-planning` to validate bundles and `just index` to print the listing.
+/ Tiny), create a change file, and ship — that file is the authoritative spec. Run
+`just check-planning` to validate changes and `just index` to print the listing.
 Release notes: copy `planning/releases/TEMPLATE.md` to
 `planning/releases/<version>.md` (bare version, no `v` prefix) when cutting a
 release.
