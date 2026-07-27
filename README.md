@@ -63,29 +63,31 @@ broker = KafkaBroker(...)
 # Register KCM on the broker before any other middleware (see DI note below)
 broker.add_middleware(KafkaConcurrentProcessingMiddleware)
 
+
 @asynccontextmanager
 async def lifespan(_context: ContextRepo):
     await initialize_concurrent_processing(
         context=broker.context,
-        concurrency_limit=20,         # max concurrent tasks (minimum: 1)
-        commit_batch_size=100,        # commit after this many completed tasks
-        commit_batch_timeout_sec=5.0, # or after this many seconds
+        concurrency_limit=20,  # max concurrent tasks (minimum: 1)
+        commit_batch_size=100,  # commit after this many completed tasks
+        commit_batch_timeout_sec=5.0,  # or after this many seconds
     )
     try:
         yield
     finally:
         await stop_concurrent_processing(broker.context)
 
+
 app = AsgiFastStream(broker, lifespan=lifespan)
 
+
 @broker.subscriber("my-topic", group_id="my-group", ack_policy=AckPolicy.MANUAL)
-async def handle(msg: str) -> None:
-    ...
+async def handle(msg: str) -> None: ...
+
 
 # Subscribers without AckPolicy.MANUAL are passed through unchanged
 @broker.subscriber("other-topic", group_id="other-group")
-async def handle_other(msg: str) -> None:
-    ...
+async def handle_other(msg: str) -> None: ...
 ```
 
 ## Core Concepts
@@ -150,7 +152,7 @@ DI frameworks like `modern-di-faststream` register a broker-level middleware tha
 ```python
 broker = KafkaBroker(...)
 broker.add_middleware(KafkaConcurrentProcessingMiddleware)  # registered first → outermost
-modern_di_faststream.setup_di(app, container=container)    # registered after → inner to KCM
+modern_di_faststream.setup_di(app, container=container)  # registered after → inner to KCM
 ```
 
 ## How It Works
