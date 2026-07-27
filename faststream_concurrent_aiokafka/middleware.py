@@ -167,7 +167,7 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
                 typing.assert_never(route)
 
 
-async def initialize_concurrent_processing(  # noqa: PLR0913
+async def initialize_concurrent_processing(  # noqa: PLR0913, PLR0917
     context: ContextRepo,
     concurrency_limit: int = consts.DEFAULT_CONCURRENCY_LIMIT,
     commit_batch_size: int = consts.DEFAULT_COMMIT_BATCH_SIZE,
