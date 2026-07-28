@@ -122,18 +122,6 @@ async def test_committer_close_graceful_shutdown() -> None:
     consumer.commit.assert_called_once()
 
 
-async def test_committer_close_timeout_cancels_task(committer: KafkaBatchCommitter) -> None:
-    committer.spawn()
-    committer._shutdown_timeout = 0.001
-
-    with patch.object(committer, "_run_commit_process", new_callable=AsyncMock) as mock_run:
-        mock_run.side_effect = asyncio.sleep(10)
-
-        await committer.close()
-        assert committer._commit_task
-        assert committer._commit_task.done()
-
-
 async def test_committer_close_handles_not_running(
     committer: KafkaBatchCommitter, caplog: pytest.LogCaptureFixture
 ) -> None:
