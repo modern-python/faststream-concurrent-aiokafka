@@ -4,12 +4,19 @@ import inspect
 import logging
 import typing
 
-from faststream.exceptions import IgnoredException
+from faststream.exceptions import (
+    AckMessage,
+    IgnoredException,
+    NackMessage,
+    RejectMessage,
+    SkipMessage,
+    StopApplication,
+    StopConsume,
+)
 from faststream.kafka import ConsumerRecord, TopicPartition
 from faststream.kafka.message import KafkaAckableMessage
 
 from faststream_concurrent_aiokafka import batch_committer, consts
-from faststream_concurrent_aiokafka._signals import classify_signal
 from faststream_concurrent_aiokafka.batch_committer import KafkaBatchCommitter
 from faststream_concurrent_aiokafka.rebalance import ConsumerRebalanceListener
 
@@ -30,15 +37,35 @@ async def _absorb_control_signal(coroutine: typing.Awaitable[typing.Any]) -> typ
     application outright with in-flight offsets uncommitted.
 
     Absorbing is offset-neutral: the task completes normally, and the committer commits a task
-    that is done and not cancelled either way. `_signals.classify_signal` decides the log level
-    and says whether absorbing actually honours the caller's request.
+    that is done and not cancelled either way. The level says whether absorbing actually
+    honours the caller's request. Branch order is load-bearing: the two named groups must
+    precede the `IgnoredException` catch-all.
     """
     try:
         return await coroutine
+    except (AckMessage, RejectMessage, SkipMessage) as exc:
+        # Honoured: committing is what each asks for. For Kafka a reject is an ack, and a
+        # skip means move on.
+        logger.debug("Kafka middleware. Task signalled %s; the offset commits", type(exc).__name__)
+    except (NackMessage, StopConsume, StopApplication) as exc:
+        # Not honourable from a concurrently dispatched task: nack cannot un-commit a batched
+        # offset, and neither stop signal can reach the subscriber or the application.
+        # logger.error, not logger.exception - a traceback here is the noise we are removing.
+        logger.error(  # noqa: TRY400
+            "Kafka middleware. Task signalled %s, which concurrent processing cannot honour; "
+            "the offset commits and execution continues",
+            type(exc).__name__,
+        )
     except IgnoredException as exc:
-        policy: typing.Final = classify_signal(exc)
-        logger.log(policy.level, "Kafka middleware. %s (%s)", policy.reason, type(exc).__name__)
-        return None
+        # Absorbed too. Letting an unknown signal reach the task is never the better default:
+        # StopApplication proves it, subclassing SystemExit which asyncio re-raises into the
+        # event loop. The name is the only diagnostic left, so it goes in the message.
+        logger.error(  # noqa: TRY400
+            "Kafka middleware. Task raised an unrecognised FastStream control signal %s; "
+            "it was absorbed and the offset commits",
+            type(exc).__name__,
+        )
+    return None
 
 
 class KafkaConcurrentHandler:

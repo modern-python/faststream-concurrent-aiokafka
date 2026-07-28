@@ -51,8 +51,11 @@ would otherwise end the asyncio task, which costs three things no log level can 
   loop**, which propagates out of `run_forever`. Unshielded, one such signal kills
   the application with in-flight tasks abandoned and their offsets uncommitted.
 
-`_signals.classify_signal` (a pure, asyncio-free table) decides the log level. The
-level states whether absorbing the signal actually honours the caller:
+Three ordered `except` groups decide the log level, letting Python's own exception
+matching do the dispatch (so a user subclass of a known signal inherits its group).
+The branch order is load-bearing: both named groups must precede the
+`IgnoredException` catch-all. The level states whether absorbing the signal
+actually honours the caller:
 
 | signal | offset | log | honoured? |
 |---|---|---|---|
