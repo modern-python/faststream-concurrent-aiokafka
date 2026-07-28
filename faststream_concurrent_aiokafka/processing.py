@@ -4,11 +4,12 @@ import inspect
 import logging
 import typing
 
-from faststream.exceptions import AckMessage
+from faststream.exceptions import IgnoredException
 from faststream.kafka import ConsumerRecord, TopicPartition
 from faststream.kafka.message import KafkaAckableMessage
 
 from faststream_concurrent_aiokafka import batch_committer, consts
+from faststream_concurrent_aiokafka._signals import classify_signal
 from faststream_concurrent_aiokafka.batch_committer import KafkaBatchCommitter
 from faststream_concurrent_aiokafka.rebalance import ConsumerRebalanceListener
 
@@ -16,22 +17,27 @@ from faststream_concurrent_aiokafka.rebalance import ConsumerRebalanceListener
 logger = logging.getLogger(__name__)
 
 
-async def _absorb_ack_message(coroutine: typing.Awaitable[typing.Any]) -> typing.Any:  # noqa: ANN401
-    """Run the user coroutine, absorbing an `AckMessage` raised anywhere inside it.
+async def _absorb_control_signal(coroutine: typing.Awaitable[typing.Any]) -> typing.Any:  # noqa: ANN401
+    """Run the user coroutine, absorbing any FastStream control signal raised inside it.
 
     A middleware registered *after* `KafkaConcurrentProcessingMiddleware` runs inside this
-    coroutine, so an `AckMessage` it raises would otherwise end the asyncio task. That is
-    costly in two ways the log level cannot fix: the task keeps the exception, its
-    traceback, and every frame the traceback references — including the message body —
-    alive until the committer commits the offset; and asyncio task-factory wrappers such
-    as `sentry_sdk`'s `AsyncioIntegration` see it inside the task and report it as an
-    unhandled error. Absorbing it here is offset-neutral: the task completes normally, and
-    a completed task is committed exactly as one that ended with an exception was.
+    coroutine, so a signal it raises would otherwise end the asyncio task. That costs three
+    things no log level can fix. The task keeps the exception, its traceback, and every frame
+    the traceback references - including the message body - alive until the committer commits
+    the offset. Asyncio task-factory wrappers such as `sentry_sdk`'s `AsyncioIntegration` see
+    it inside the task and report it as an unhandled error. And `StopApplication` subclasses
+    `SystemExit`, which asyncio's `Task.__step` re-raises into the event loop, killing the
+    application outright with in-flight offsets uncommitted.
+
+    Absorbing is offset-neutral: the task completes normally, and the committer commits a task
+    that is done and not cancelled either way. `_signals.classify_signal` decides the log level
+    and says whether absorbing actually honours the caller's request.
     """
     try:
         return await coroutine
-    except AckMessage:
-        logger.debug("Kafka middleware. Task signalled AckMessage")
+    except IgnoredException as exc:
+        policy: typing.Final = classify_signal(exc)
+        logger.log(policy.level, "Kafka middleware. %s", policy.reason)
         return None
 
 
@@ -56,7 +62,7 @@ class KafkaConcurrentHandler:
         self._limiter.release()
         self._tracked_tasks.discard(task)
         if task.cancelled():
-            # stop() can cancel the _absorb_ack_message shield before its first step, so the
+            # stop() can cancel the _absorb_control_signal shield before its first step, so the
             # shield never awaited `coroutine`. Close it here: an un-awaited coroutine emits a
             # RuntimeWarning through sys.unraisablehook, which lands in the app's logs and
             # error reporter. Before the shield existed the Task owned `coroutine` directly
@@ -75,7 +81,7 @@ class KafkaConcurrentHandler:
         kafka_message: KafkaAckableMessage,
     ) -> None:
         await self._limiter.acquire()
-        task: typing.Final = asyncio.ensure_future(_absorb_ack_message(coroutine))
+        task: typing.Final = asyncio.ensure_future(_absorb_control_signal(coroutine))
         self._tracked_tasks.add(task)
         task.add_done_callback(functools.partial(self._finish_task, coroutine))
         try:

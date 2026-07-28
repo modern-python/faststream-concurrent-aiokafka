@@ -9,7 +9,14 @@ from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
-from faststream.exceptions import AckMessage
+from faststream.exceptions import (
+    AckMessage,
+    NackMessage,
+    RejectMessage,
+    SkipMessage,
+    StopApplication,
+    StopConsume,
+)
 
 from faststream_concurrent_aiokafka.batch_committer import CommitterIsDeadError
 from faststream_concurrent_aiokafka.processing import KafkaConcurrentHandler
@@ -80,20 +87,26 @@ async def test_concurrent_failed_task_exception(
     assert records[-1].exc_info is not None
 
 
-async def test_concurrent_ack_message_never_reaches_the_task(
-    handler: KafkaConcurrentHandler, sample_message: MockKafkaMessage, sample_record: MockConsumerRecord
-) -> None:
-    """AckMessage must be absorbed inside the coroutine, never ending the asyncio task.
+_ALL_SIGNALS: typing.Final = [AckMessage, RejectMessage, SkipMessage, NackMessage, StopConsume, StopApplication]
 
-    A task that ends with an exception keeps that exception, its traceback, and every
-    frame the traceback references alive for as long as the committer holds the task in
-    pending, which pins the message body. It is also visible to asyncio task-factory
-    wrappers such as sentry_sdk's AsyncioIntegration, which reports it as an unhandled
-    error regardless of the log level we choose.
+
+@pytest.mark.parametrize("signal_cls", _ALL_SIGNALS)
+async def test_concurrent_control_signal_never_reaches_the_task(
+    handler: KafkaConcurrentHandler,
+    sample_message: MockKafkaMessage,
+    sample_record: MockConsumerRecord,
+    signal_cls: type[Exception],
+) -> None:
+    """Every control signal is absorbed inside the coroutine, never ending the asyncio task.
+
+    A task ending with an exception retains that exception, its traceback, and every frame
+    the traceback references - including the message body - until the committer commits the
+    offset. It is also visible to asyncio task-factory wrappers such as sentry_sdk's
+    AsyncioIntegration, which reports it as an unhandled error.
     """
 
     async def coro() -> None:
-        raise AckMessage
+        raise signal_cls
 
     await handler.handle_task(coro(), sample_record, sample_message)  # ty: ignore[invalid-argument-type]
     task: typing.Final = next(iter(handler._tracked_tasks))
@@ -104,25 +117,57 @@ async def test_concurrent_ack_message_never_reaches_the_task(
     assert task.result() is None
 
 
-async def test_concurrent_ack_message_logged_at_debug_without_traceback(
+@pytest.mark.parametrize(
+    ("signal_cls", "expected_level"),
+    [
+        (AckMessage, logging.DEBUG),
+        (RejectMessage, logging.DEBUG),
+        (SkipMessage, logging.DEBUG),
+        (NackMessage, logging.ERROR),
+        (StopConsume, logging.ERROR),
+        (StopApplication, logging.ERROR),
+    ],
+)
+async def test_concurrent_control_signal_log_level(  # noqa: PLR0913, PLR0917
     handler: KafkaConcurrentHandler,
     sample_message: MockKafkaMessage,
     sample_record: MockConsumerRecord,
     caplog: pytest.LogCaptureFixture,
+    signal_cls: type[Exception],
+    expected_level: int,
 ) -> None:
     caplog.set_level(logging.DEBUG)
 
     async def coro() -> None:
-        raise AckMessage
+        raise signal_cls
 
     await handler.handle_task(coro(), sample_record, sample_message)  # ty: ignore[invalid-argument-type]
     await asyncio.wait([next(iter(handler._tracked_tasks))])
 
     records: typing.Final = [r for r in caplog.records if r.name == "faststream_concurrent_aiokafka.processing"]
     assert len(records) == 1
-    assert records[0].levelno == logging.DEBUG
+    assert records[0].levelno == expected_level
     assert records[0].exc_info is None
-    assert "AckMessage" in records[0].getMessage()
+    assert signal_cls.__name__ in records[0].getMessage()
+
+
+async def test_concurrent_stop_application_does_not_tear_down_the_event_loop(
+    handler: KafkaConcurrentHandler, sample_message: MockKafkaMessage, sample_record: MockConsumerRecord
+) -> None:
+    """StopApplication subclasses SystemExit, which asyncio's Task.__step re-raises into the loop.
+
+    Absorbing it in the shield is the only thing keeping the loop alive; without it the whole
+    application dies with in-flight tasks abandoned and their offsets uncommitted.
+    """
+
+    async def coro() -> None:
+        raise StopApplication
+
+    await handler.handle_task(coro(), sample_record, sample_message)  # ty: ignore[invalid-argument-type]
+    await asyncio.wait([next(iter(handler._tracked_tasks))])
+    await asyncio.sleep(0)  # give the loop a tick to die if the signal escaped
+
+    assert asyncio.get_running_loop().is_running()
 
 
 async def test_concurrent_closes_user_coroutine_when_shield_cancelled_before_first_step(

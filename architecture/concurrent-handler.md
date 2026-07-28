@@ -30,13 +30,13 @@ and enqueues a `KafkaCommitTask` on the committer via `send_task`. The commit
 task carries the asyncio task, the record offset, the consumer, and the
 `TopicPartition`.
 
-### The AckMessage shield
+### The control-signal shield
 
-The user coroutine is wrapped in `_absorb_ack_message` before it becomes a task.
+The user coroutine is wrapped in `_absorb_control_signal` before it becomes a task.
 A middleware registered *after* `KafkaConcurrentProcessingMiddleware` is **inner**
 — FastStream wraps `middlewares[::-1]` in registration order, so that middleware's
-`consume_scope` *is* the dispatched coroutine. An `AckMessage` it raises would
-otherwise end the asyncio task, which is costly in two ways no log level can fix:
+`consume_scope` *is* the dispatched coroutine. A FastStream control signal it raises
+would otherwise end the asyncio task, which costs three things no log level can fix:
 
 - The task retains the exception, its traceback, and every frame the traceback
   references — including the message body — until the committer commits the
@@ -44,15 +44,37 @@ otherwise end the asyncio task, which is costly in two ways no log level can fix
   retained without the shield, 18.5 KB/message with it.
 - asyncio task-factory wrappers see it *inside* the task. `sentry_sdk`'s
   `AsyncioIntegration` wraps every task coroutine in
-  `try: await coro / except Exception: reraise(*_capture_exception())` and
-  reports `AckMessage` as an unhandled error, since it subclasses `Exception`.
+  `try: await coro / except Exception: reraise(*_capture_exception())` and reports
+  the signal as an unhandled error. All six signals subclass `Exception`.
+- `StopApplication` subclasses `SystemExit`, and asyncio's `Task.__step`
+  special-cases that: it sets the task exception **and re-raises into the event
+  loop**, which propagates out of `run_forever`. Unshielded, one such signal kills
+  the application with in-flight tasks abandoned and their offsets uncommitted.
 
-Absorbing it in the shield is offset-neutral: the task completes normally, and a
-completed task is committed exactly as one that ended with an exception was. Any
-`extra_options` passed to `AckMessage(**extra_options)` are ignored — the ack here
-is a batched offset commit, not a per-message `message.ack(**extra_options)` call.
-Only `AckMessage` is absorbed; every other exception still ends the task and is
-logged by `_finish_task`.
+`_signals.classify_signal` (a pure, asyncio-free table) decides the log level. The
+level states whether absorbing the signal actually honours the caller:
+
+| signal | offset | log | honoured? |
+|---|---|---|---|
+| `AckMessage` | commit | DEBUG | yes — committing *is* the ack |
+| `RejectMessage` | commit | DEBUG | yes — for Kafka `reject()` is `ack()` |
+| `SkipMessage` | commit | DEBUG | yes — skip and move on |
+| `NackMessage` | commit | ERROR | no — asks for redelivery, we advance |
+| `StopConsume` | commit | ERROR | no — the subscriber keeps consuming |
+| `StopApplication` | commit | ERROR | no — the application keeps running |
+| unrecognised `IgnoredException` | commit | ERROR | unknown — absorbed so a future signal cannot crash the loop |
+
+Absorbing is offset-neutral: the task completes normally, and a completed task is
+committed exactly as one that ended with an exception was. Any `extra_options`
+passed to `AckMessage(**extra_options)` are ignored — the ack here is a batched
+offset commit, not a per-message `message.ack(**extra_options)` call. Every
+exception outside the family still ends the task and is logged by `_finish_task`.
+
+The two ERROR-level stop signals are a deliberate gap, not an oversight: an
+application asking to stop will not stop, and the ERROR is the whole mitigation.
+Honouring them needs the subscriber captured from the scoped `"handler_"` context
+at dispatch time and a decision about offset advance that risks partition
+poisoning; see [`planning/deferred.md`](../planning/deferred.md).
 
 Because the shield is a wrapper, `stop()` can cancel it *before its first step*,
 in which case it never awaited the coroutine it holds. `_finish_task` closes that
