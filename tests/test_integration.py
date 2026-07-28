@@ -490,7 +490,9 @@ async def test_real_kafka_stop_application_from_inner_middleware_does_not_kill_t
 
     @broker.subscriber(topic, group_id="stopapp-group", auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: dict[str, int]) -> None:
-        processed.append(msg)
+        # Unreachable by design: RaiseStopApplication short-circuits before call_next, which
+        # is what `processed == []` below asserts. Kept so the subscriber is realistic.
+        processed.append(msg)  # pragma: no cover
 
     await _create_topic(kafka_bootstrap_servers, topic)
     async with broker:
