@@ -475,24 +475,30 @@ async def test_real_kafka_stop_application_from_inner_middleware_does_not_kill_t
     processed: typing.Final[list[dict[str, int]]] = []
     topic: typing.Final = _topic("stopapp")
     broker: typing.Final = _broker(kafka_bootstrap_servers)
+    n_messages: typing.Final = 3
+    seen = 0
 
-    class RaiseStopApplication(BaseMiddleware):
-        async def consume_scope(  # ty: ignore[invalid-method-override]
+    class RaiseStopApplicationOnFirst(BaseMiddleware):
+        """Raises on the first message only, so later ones prove the app kept working."""
+
+        async def consume_scope(
             self,
-            _call_next: typing.Callable[[typing.Any], typing.Awaitable[typing.Any]],
-            _msg: typing.Any,  # noqa: ANN401
+            call_next: typing.Callable[[typing.Any], typing.Awaitable[typing.Any]],
+            msg: typing.Any,  # noqa: ANN401
         ) -> typing.Any:  # noqa: ANN401
-            raise StopApplication
+            nonlocal seen
+            seen += 1
+            if seen == 1:
+                raise StopApplication
+            return await call_next(msg)
 
     # Added AFTER the concurrent middleware, so it is INNER: it runs inside the
     # coroutine that KafkaConcurrentProcessingMiddleware dispatches as a task.
-    broker.add_middleware(RaiseStopApplication)
+    broker.add_middleware(RaiseStopApplicationOnFirst)
 
     @broker.subscriber(topic, group_id="stopapp-group", auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: dict[str, int]) -> None:
-        # Unreachable by design: RaiseStopApplication short-circuits before call_next, which
-        # is what `processed == []` below asserts. Kept so the subscriber is realistic.
-        processed.append(msg)  # pragma: no cover
+        processed.append(msg)
 
     await _create_topic(kafka_bootstrap_servers, topic)
     async with broker:
@@ -502,7 +508,7 @@ async def test_real_kafka_stop_application_from_inner_middleware_does_not_kill_t
         )
         await asyncio.sleep(CONSUMER_READY_SLEEP)
         try:
-            for message_id in range(3):
+            for message_id in range(n_messages):
                 await broker.publish({"id": message_id}, topic=topic)
             await asyncio.sleep(POLL_SLEEP)
 
@@ -512,5 +518,8 @@ async def test_real_kafka_stop_application_from_inner_middleware_does_not_kill_t
         finally:
             await stop_concurrent_processing(broker.context)
 
-    # The inner middleware short-circuits before call_next, so the handler never runs.
-    assert processed == []
+    # The signal was raised for the first message and swallowed the handler call for it.
+    # Every later message still reached the handler: the application kept consuming after
+    # the signal that used to kill it. This is the regression, not merely "the loop is alive".
+    assert seen == n_messages
+    assert [m["id"] for m in processed] == [1, 2]
