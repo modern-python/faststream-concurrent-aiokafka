@@ -4,8 +4,9 @@ import typing
 import uuid
 
 from aiokafka.admin import AIOKafkaAdminClient, NewTopic
-from faststream import ContextRepo
+from faststream import BaseMiddleware, ContextRepo
 from faststream.asgi import AsgiFastStream
+from faststream.exceptions import StopApplication
 from faststream.kafka import KafkaBroker, KafkaRouter
 from faststream.middlewares import AckPolicy
 
@@ -460,3 +461,54 @@ async def test_asgi_faststream_basic_processing(kafka_bootstrap_servers: str) ->
 
     assert len(processed) == 1
     assert processed[0]["id"] == 42
+
+
+async def test_real_kafka_stop_application_from_inner_middleware_does_not_kill_the_app(
+    kafka_bootstrap_servers: str,
+) -> None:
+    """A middleware registered after ours raising StopApplication must not tear down the loop.
+
+    StopApplication subclasses SystemExit; asyncio re-raises that out of the task and into
+    the event loop. Before the control-signal shield this killed the application, abandoning
+    in-flight tasks and their offsets.
+    """
+    processed: typing.Final[list[dict[str, int]]] = []
+    topic: typing.Final = _topic("stopapp")
+    broker: typing.Final = _broker(kafka_bootstrap_servers)
+
+    class RaiseStopApplication(BaseMiddleware):
+        async def consume_scope(  # ty: ignore[invalid-method-override]
+            self,
+            _call_next: typing.Callable[[typing.Any], typing.Awaitable[typing.Any]],
+            _msg: typing.Any,  # noqa: ANN401
+        ) -> typing.Any:  # noqa: ANN401
+            raise StopApplication
+
+    # Added AFTER the concurrent middleware, so it is INNER: it runs inside the
+    # coroutine that KafkaConcurrentProcessingMiddleware dispatches as a task.
+    broker.add_middleware(RaiseStopApplication)
+
+    @broker.subscriber(topic, group_id="stopapp-group", auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
+    async def handler(msg: dict[str, int]) -> None:
+        processed.append(msg)
+
+    await _create_topic(kafka_bootstrap_servers, topic)
+    async with broker:
+        await broker.start()
+        concurrent_handler: typing.Final = await initialize_concurrent_processing(
+            context=broker.context, commit_batch_size=1, commit_batch_timeout_sec=1, concurrency_limit=5
+        )
+        await asyncio.sleep(CONSUMER_READY_SLEEP)
+        try:
+            for message_id in range(3):
+                await broker.publish({"id": message_id}, topic=topic)
+            await asyncio.sleep(POLL_SLEEP)
+
+            # Reaching here at all means the loop survived. is_healthy additionally proves
+            # the committer's background task was not taken down with it.
+            assert concurrent_handler.is_healthy
+        finally:
+            await stop_concurrent_processing(broker.context)
+
+    # The inner middleware short-circuits before call_next, so the handler never runs.
+    assert processed == []
