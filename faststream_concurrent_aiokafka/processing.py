@@ -1,7 +1,10 @@
 import asyncio
+import functools
+import inspect
 import logging
 import typing
 
+from faststream.exceptions import AckMessage
 from faststream.kafka import ConsumerRecord, TopicPartition
 from faststream.kafka.message import KafkaAckableMessage
 
@@ -11,6 +14,25 @@ from faststream_concurrent_aiokafka.rebalance import ConsumerRebalanceListener
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _absorb_ack_message(coroutine: typing.Awaitable[typing.Any]) -> typing.Any:  # noqa: ANN401
+    """Run the user coroutine, absorbing an `AckMessage` raised anywhere inside it.
+
+    A middleware registered *after* `KafkaConcurrentProcessingMiddleware` runs inside this
+    coroutine, so an `AckMessage` it raises would otherwise end the asyncio task. That is
+    costly in two ways the log level cannot fix: the task keeps the exception, its
+    traceback, and every frame the traceback references — including the message body —
+    alive until the committer commits the offset; and asyncio task-factory wrappers such
+    as `sentry_sdk`'s `AsyncioIntegration` see it inside the task and report it as an
+    unhandled error. Absorbing it here is offset-neutral: the task completes normally, and
+    a completed task is committed exactly as one that ended with an exception was.
+    """
+    try:
+        return await coroutine
+    except AckMessage:
+        logger.debug("Kafka middleware. Task signalled AckMessage")
+        return None
 
 
 class KafkaConcurrentHandler:
@@ -30,13 +52,21 @@ class KafkaConcurrentHandler:
         self._is_running: bool = False
         self._committer: KafkaBatchCommitter = committer
 
-    def _finish_task(self, task: asyncio.Task[typing.Any]) -> None:
+    def _finish_task(self, coroutine: typing.Awaitable[typing.Any], task: asyncio.Task[typing.Any]) -> None:
         self._limiter.release()
         self._tracked_tasks.discard(task)
-        if not task.cancelled():
-            exc: typing.Final[BaseException | None] = task.exception()
-            if exc:
-                logger.error("Kafka middleware. Task has failed with the exception", exc_info=exc)
+        if task.cancelled():
+            # stop() can cancel the _absorb_ack_message shield before its first step, so the
+            # shield never awaited `coroutine`. Close it here: an un-awaited coroutine emits a
+            # RuntimeWarning through sys.unraisablehook, which lands in the app's logs and
+            # error reporter. Before the shield existed the Task owned `coroutine` directly
+            # and closed it on cancellation; this preserves that.
+            if inspect.iscoroutine(coroutine) and inspect.getcoroutinestate(coroutine) == inspect.CORO_CREATED:
+                coroutine.close()
+            return
+        exc: typing.Final[BaseException | None] = task.exception()
+        if exc:
+            logger.error("Kafka middleware. Task has failed with the exception", exc_info=exc)
 
     async def handle_task(
         self,
@@ -45,9 +75,9 @@ class KafkaConcurrentHandler:
         kafka_message: KafkaAckableMessage,
     ) -> None:
         await self._limiter.acquire()
-        task: typing.Final = asyncio.ensure_future(coroutine)
+        task: typing.Final = asyncio.ensure_future(_absorb_ack_message(coroutine))
         self._tracked_tasks.add(task)
-        task.add_done_callback(self._finish_task)
+        task.add_done_callback(functools.partial(self._finish_task, coroutine))
         try:
             await self._committer.send_task(
                 batch_committer.KafkaCommitTask(

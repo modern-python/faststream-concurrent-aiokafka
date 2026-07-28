@@ -1,12 +1,15 @@
 # ruff: noqa: SLF001
 import asyncio
 import contextlib
+import functools
+import inspect
 import logging
 import typing
 from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
+from faststream.exceptions import AckMessage
 
 from faststream_concurrent_aiokafka.batch_committer import CommitterIsDeadError
 from faststream_concurrent_aiokafka.processing import KafkaConcurrentHandler
@@ -57,7 +60,7 @@ async def test_concurrent_releases_limiter_on_completion(handler_with_limit: Kaf
     mock_task: typing.Final = MagicMock()
     mock_task.cancelled.return_value = False
     mock_task.exception.return_value = None
-    handler_with_limit._finish_task(mock_task)
+    handler_with_limit._finish_task(None, mock_task)  # ty: ignore[invalid-argument-type]
     assert handler_with_limit._limiter._value == expected_value
 
 
@@ -69,8 +72,94 @@ async def test_concurrent_failed_task_exception(
     mock_task: typing.Final = MagicMock()
     mock_task.cancelled.return_value = False
     mock_task.exception.return_value = ValueError("Task failed")
-    handler_with_limit._finish_task(mock_task)
-    assert "Task has failed with the exception" in caplog.text
+    handler_with_limit._finish_task(None, mock_task)  # ty: ignore[invalid-argument-type]
+
+    records: typing.Final = [r for r in caplog.records if r.name == "faststream_concurrent_aiokafka.processing"]
+    assert "Task has failed with the exception" in records[-1].getMessage()
+    # A genuine failure keeps its traceback; the AckMessage branch must not widen.
+    assert records[-1].exc_info is not None
+
+
+async def test_concurrent_ack_message_never_reaches_the_task(
+    handler: KafkaConcurrentHandler, sample_message: MockKafkaMessage, sample_record: MockConsumerRecord
+) -> None:
+    """AckMessage must be absorbed inside the coroutine, never ending the asyncio task.
+
+    A task that ends with an exception keeps that exception, its traceback, and every
+    frame the traceback references alive for as long as the committer holds the task in
+    pending, which pins the message body. It is also visible to asyncio task-factory
+    wrappers such as sentry_sdk's AsyncioIntegration, which reports it as an unhandled
+    error regardless of the log level we choose.
+    """
+
+    async def coro() -> None:
+        raise AckMessage
+
+    await handler.handle_task(coro(), sample_record, sample_message)  # ty: ignore[invalid-argument-type]
+    task: typing.Final = next(iter(handler._tracked_tasks))
+    await asyncio.wait([task])
+
+    assert not task.cancelled()
+    assert task.exception() is None
+    assert task.result() is None
+
+
+async def test_concurrent_ack_message_logged_at_debug_without_traceback(
+    handler: KafkaConcurrentHandler,
+    sample_message: MockKafkaMessage,
+    sample_record: MockConsumerRecord,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+
+    async def coro() -> None:
+        raise AckMessage
+
+    await handler.handle_task(coro(), sample_record, sample_message)  # ty: ignore[invalid-argument-type]
+    await asyncio.wait([next(iter(handler._tracked_tasks))])
+
+    records: typing.Final = [r for r in caplog.records if r.name == "faststream_concurrent_aiokafka.processing"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
+    assert records[0].exc_info is None
+    assert "AckMessage" in records[0].getMessage()
+
+
+async def test_concurrent_closes_user_coroutine_when_shield_cancelled_before_first_step(
+    handler: KafkaConcurrentHandler, sample_message: MockKafkaMessage, sample_record: MockConsumerRecord
+) -> None:
+    """A shield cancelled before its first step must still close the coroutine it wraps.
+
+    The shield never ran, so it never awaited the user coroutine. Dropping it un-awaited
+    raises RuntimeWarning through sys.unraisablehook, which reaches the app's logs and
+    error reporter - the exact noise this dispatch path exists to avoid.
+    """
+    # asyncio.sleep is a stdlib coroutine, so the never-executed body costs no coverage.
+    user_coroutine: typing.Final = asyncio.sleep(0)
+    await handler.handle_task(user_coroutine, sample_record, sample_message)  # ty: ignore[invalid-argument-type]
+    task: typing.Final = next(iter(handler._tracked_tasks))
+
+    task.cancel()  # cancel before the shield's first step
+    await asyncio.wait([task])
+
+    assert task.cancelled()
+    assert inspect.getcoroutinestate(user_coroutine) == inspect.CORO_CLOSED
+
+
+async def test_concurrent_real_exception_still_reaches_the_task(
+    handler: KafkaConcurrentHandler, sample_message: MockKafkaMessage, sample_record: MockConsumerRecord
+) -> None:
+    """Only AckMessage is absorbed. A genuine failure must still end the task."""
+
+    async def coro() -> None:
+        error_message = "boom"
+        raise ValueError(error_message)
+
+    await handler.handle_task(coro(), sample_record, sample_message)  # ty: ignore[invalid-argument-type]
+    task: typing.Final = next(iter(handler._tracked_tasks))
+    await asyncio.wait([task])
+
+    assert isinstance(task.exception(), ValueError)
 
 
 async def test_concurrent_finish_task_discards_from_tracked_set(handler: KafkaConcurrentHandler) -> None:
@@ -78,7 +167,7 @@ async def test_concurrent_finish_task_discards_from_tracked_set(handler: KafkaCo
     await real_task
     handler._tracked_tasks.add(real_task)
 
-    handler._finish_task(real_task)
+    handler._finish_task(None, real_task)  # ty: ignore[invalid-argument-type]
 
     assert real_task not in handler._tracked_tasks
 
@@ -231,7 +320,7 @@ async def test_concurrent_finish_task_does_not_crash_on_cancelled_task(
 ) -> None:
     task: typing.Final = asyncio.create_task(asyncio.sleep(10))
     handler_with_limit._tracked_tasks.add(task)
-    task.add_done_callback(handler_with_limit._finish_task)
+    task.add_done_callback(functools.partial(handler_with_limit._finish_task, None))  # ty: ignore[invalid-argument-type]
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
