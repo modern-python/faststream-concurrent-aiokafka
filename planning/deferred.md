@@ -25,7 +25,7 @@ committer only asks `done() and not cancelled()` — it commits regardless:
 - `StopConsume` / `StopApplication` — never reach `usecase.consume()`, so the
   subscriber never stops and the app never exits.
 - All of them also still pay the ERROR-plus-traceback cost that the AckMessage
-  change removed (≈2.5–5.4× CPU per message, scaling with stack depth).
+  change removed (2.5-5.4x CPU per message, scaling with stack depth).
 
 **Deferred because** the fix is not a logging tweak. Honoring "do not advance"
 means reusing the cancelled-task hard boundary, whose watermark is cleared only

@@ -24,7 +24,9 @@ is owned by whoever calls init/stop, not by module-level state.
   inside the dispatched coroutine. That is a FastStream control-flow signal,
   not a failure, so it is logged at DEBUG with no traceback: formatting one per
   message costs 2.5-5.4x CPU and scales with stack depth. The offset is
-  committed either way, since the task is done and not cancelled.
+  committed either way, since the task is done and not cancelled — but any
+  `extra_options` passed to `AckMessage(**extra_options)` are ignored, since
+  the ack here is a batched offset commit, not a per-message `message.ack(**extra_options)` call.
 - A `KafkaBatchCommitter` that performs the actual offset commits.
 
 ## Dispatch

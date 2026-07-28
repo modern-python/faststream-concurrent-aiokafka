@@ -71,9 +71,11 @@ async def test_concurrent_failed_task_exception(
     mock_task.cancelled.return_value = False
     mock_task.exception.return_value = ValueError("Task failed")
     handler_with_limit._finish_task(mock_task)
-    assert "Task has failed with the exception" in caplog.text
+
+    records: typing.Final = [r for r in caplog.records if r.name == "faststream_concurrent_aiokafka.processing"]
+    assert "Task has failed with the exception" in records[-1].getMessage()
     # A genuine failure keeps its traceback; the AckMessage branch must not widen.
-    assert caplog.records[-1].exc_info is not None
+    assert records[-1].exc_info is not None
 
 
 async def test_concurrent_ack_message_logged_at_debug_without_traceback(
