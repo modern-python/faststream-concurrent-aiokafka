@@ -9,6 +9,7 @@ import pytest
 import pytest_asyncio
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 from faststream.kafka.message import FakeConsumer, KafkaAckableMessage
+from faststream.middlewares import AckPolicy
 
 from faststream_concurrent_aiokafka.batch_committer import CommitterIsDeadError
 from faststream_concurrent_aiokafka.middleware import (
@@ -180,7 +181,7 @@ async def test_middleware_shutting_down_skips_message(
     """
     caplog.set_level(logging.WARNING)
 
-    @setup_broker.subscriber("shutting-down-topic", group_id="shutting-down-group")
+    @setup_broker.subscriber("shutting-down-topic", group_id="shutting-down-group", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: typing.Any) -> None: ...
 
     async with TestKafkaBroker(setup_broker) as test_broker:
@@ -215,7 +216,7 @@ async def test_middleware_catches_committer_is_dead_during_race(
     """
     caplog.set_level(logging.WARNING)
 
-    @setup_broker.subscriber("dead-committer-topic", group_id="dead-committer-group")
+    @setup_broker.subscriber("dead-committer-topic", group_id="dead-committer-group", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: typing.Any) -> None: ...
 
     async with TestKafkaBroker(setup_broker) as test_broker:
@@ -253,7 +254,7 @@ async def test_middleware_logs_and_propagates_cancelled_error(
     """
     caplog.set_level(logging.WARNING)
 
-    @setup_broker.subscriber("cancel-topic", group_id="cancel-group")
+    @setup_broker.subscriber("cancel-topic", group_id="cancel-group", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: typing.Any) -> None: ...
 
     async with TestKafkaBroker(setup_broker) as test_broker:
@@ -300,7 +301,7 @@ async def test_middleware_no_kafka_message_with_batch_processing_raises(setup_br
 
 
 async def test_middleware_raises_if_auto_commit_enabled(setup_broker: KafkaBroker) -> None:
-    @setup_broker.subscriber("auto-commit-topic", group_id="auto-commit-group")
+    @setup_broker.subscriber("auto-commit-topic", group_id="auto-commit-group", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: typing.Any) -> None: ...
 
     async with TestKafkaBroker(setup_broker) as test_broker:
@@ -322,7 +323,7 @@ async def test_middleware_raises_if_auto_commit_enabled(setup_broker: KafkaBroke
 
 
 async def test_middleware_no_handler_in_context_raises(setup_broker: KafkaBroker) -> None:
-    @setup_broker.subscriber("no-handler-topic", group_id="no-handler-group")
+    @setup_broker.subscriber("no-handler-topic", group_id="no-handler-group", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: typing.Any) -> None: ...
 
     async with TestKafkaBroker(setup_broker) as test_broker:
@@ -546,6 +547,100 @@ def test_classify_non_manual_ack_passes_through() -> None:
     assert route == _PassThrough()
 
 
+def test_classify_ack_policy_manual_dispatches() -> None:
+    # The only supported policy: FastStream hands acknowledgement to us, so we may dispatch.
+    route: typing.Final = _classify(
+        committed=None,
+        attrs=_attrs(),
+        handler=_handler(is_running=True),
+        is_batch=False,
+        ack_policy=AckPolicy.MANUAL,
+    )
+    assert route == _Dispatch()
+
+
+def test_classify_ack_policy_ack_first_passes_through() -> None:
+    # ACK_FIRST is the one non-MANUAL policy that survives: it gets a plain KafkaMessage
+    # (committed=AckStatus.ACKED) plus enable_auto_commit=True, so it passes through on the
+    # committed branch and never reaches the ack_policy check.
+    route: typing.Final = _classify(
+        committed=object(),
+        attrs=_attrs(auto_commit=True),
+        handler=_handler(is_running=True),
+        is_batch=False,
+        ack_policy=AckPolicy.ACK_FIRST,
+    )
+    assert route == _PassThrough()
+
+
+def test_classify_ack_policy_ack_refused() -> None:
+    # ACK/REJECT_ON_ERROR/NACK_ON_ERROR all get KafkaAckableMessage (committed=None) AND
+    # FastStream's own AcknowledgementMiddleware, which acks the moment consume_scope returns —
+    # i.e. ahead of the dispatched task. Dispatching them would lose messages, so they are refused.
+    route: typing.Final = _classify(
+        committed=None, attrs=_attrs(), handler=_handler(is_running=True), is_batch=False, ack_policy=AckPolicy.ACK
+    )
+    assert isinstance(route, _Refuse)
+    assert "AckPolicy.ACK." in route.reason
+    assert "ack_policy=AckPolicy.MANUAL" in route.reason
+
+
+def test_classify_ack_policy_reject_on_error_refused() -> None:
+    route: typing.Final = _classify(
+        committed=None,
+        attrs=_attrs(),
+        handler=_handler(is_running=True),
+        is_batch=False,
+        ack_policy=AckPolicy.REJECT_ON_ERROR,
+    )
+    assert isinstance(route, _Refuse)
+    assert "AckPolicy.REJECT_ON_ERROR" in route.reason
+
+
+def test_classify_ack_policy_nack_on_error_refused() -> None:
+    route: typing.Final = _classify(
+        committed=None,
+        attrs=_attrs(),
+        handler=_handler(is_running=True),
+        is_batch=False,
+        ack_policy=AckPolicy.NACK_ON_ERROR,
+    )
+    assert isinstance(route, _Refuse)
+    assert "AckPolicy.NACK_ON_ERROR" in route.reason
+
+
+def test_classify_unknown_ack_policy_is_not_judged() -> None:
+    # ack_policy=None means the subscriber could not be read; an undetermined policy must not
+    # refuse an otherwise well-formed MANUAL-shaped message.
+    route: typing.Final = _classify(
+        committed=None, attrs=_attrs(), handler=_handler(is_running=True), is_batch=False, ack_policy=None
+    )
+    assert route == _Dispatch()
+
+
+def test_classify_branch_order_ack_policy_wins_over_missing_handler() -> None:
+    # A non-MANUAL subscriber is misconfigured whether or not concurrent processing was
+    # initialised, so its error precedes the missing-handler one. Pins that ordering.
+    route: typing.Final = _classify(
+        committed=None, attrs=_attrs(), handler=None, is_batch=False, ack_policy=AckPolicy.NACK_ON_ERROR
+    )
+    assert isinstance(route, _Refuse)
+    assert "AckPolicy.NACK_ON_ERROR" in route.reason
+
+
+def test_classify_branch_order_batch_wins_over_ack_policy() -> None:
+    # ...but batch is checked before it, so a batch + non-MANUAL subscriber reports batch.
+    route: typing.Final = _classify(
+        committed=None,
+        attrs=_attrs(),
+        handler=_handler(is_running=True),
+        is_batch=True,
+        ack_policy=AckPolicy.ACK,
+    )
+    assert isinstance(route, _Refuse)
+    assert "batch subscribers" in route.reason
+
+
 def test_classify_batch_subscriber_refused() -> None:
     route: typing.Final = _classify(committed=None, attrs=_attrs(), handler=_handler(is_running=True), is_batch=True)
     assert isinstance(route, _Refuse)
@@ -595,7 +690,7 @@ def test_classify_branch_order_missing_handler_wins_over_auto_commit() -> None:
 async def test_middleware_guards_direct_ack_calls_on_dispatch(setup_broker: KafkaBroker) -> None:
     """A dispatched message refuses ack/nack/reject, naming the method that was called."""
 
-    @setup_broker.subscriber("guard-topic", group_id="guard-group")
+    @setup_broker.subscriber("guard-topic", group_id="guard-group", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: typing.Any) -> None: ...
 
     async with TestKafkaBroker(setup_broker) as test_broker:
@@ -609,8 +704,14 @@ async def test_middleware_guards_direct_ack_calls_on_dispatch(setup_broker: Kafk
         finally:
             await stop_concurrent_processing(test_broker.context)
 
-    for method_name in ("ack", "nack", "reject"):
-        with pytest.raises(RuntimeError, match=method_name):
+    # Match a phrase unique to each reason, not the bare method name: "ack" is a substring of
+    # the nack and reject reasons too, so matching it would not prove the right one was raised.
+    for method_name, expected in (
+        ("ack", r"message\.ack\(\)"),
+        ("nack", r"message\.nack\(\)"),
+        ("reject", r"message\.reject\(\)"),
+    ):
+        with pytest.raises(RuntimeError, match=expected):
             getattr(guarded, method_name)()
 
 
@@ -620,7 +721,7 @@ async def test_middleware_guard_raises_without_await(setup_broker: KafkaBroker) 
     An async guard would pass every other test in this file and fail only here.
     """
 
-    @setup_broker.subscriber("guard-sync-topic", group_id="guard-sync-group")
+    @setup_broker.subscriber("guard-sync-topic", group_id="guard-sync-group", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: typing.Any) -> None: ...
 
     async with TestKafkaBroker(setup_broker) as test_broker:
@@ -684,7 +785,7 @@ async def test_middleware_does_not_guard_non_manual_ack_passthrough(setup_broker
 async def test_middleware_guard_shadows_the_instance_not_the_class(setup_broker: KafkaBroker) -> None:
     """Guarding one message must leave the class, and every other message, alone."""
 
-    @setup_broker.subscriber("guard-isolation-topic", group_id="guard-isolation-group")
+    @setup_broker.subscriber("guard-isolation-topic", group_id="guard-isolation-group", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: typing.Any) -> None: ...
 
     async with TestKafkaBroker(setup_broker) as test_broker:

@@ -43,7 +43,8 @@ pip install faststream-concurrent-aiokafka
 
 `ack_policy=AckPolicy.MANUAL` is **required** on every concurrent subscriber — the middleware enforces this at runtime.
 Without it, FastStream would commit offsets before processing tasks complete, causing silent message loss on crash.
-Subscribers that use other ack policies are automatically passed through without concurrent processing.
+`AckPolicy.ACK_FIRST` subscribers are passed through without concurrent processing (their offsets belong to aiokafka's auto-commit);
+every other policy — `ACK`, `REJECT_ON_ERROR`, `NACK_ON_ERROR` — is **refused with a `RuntimeError`**, because FastStream acknowledges those itself the moment the middleware returns, ahead of the dispatched task.
 
 > **`AsgiFastStream` note**: its lifespan receives an app-level `ContextRepo` separate from `broker.context`. Pass `broker.context` explicitly instead of the injected argument.
 
@@ -85,8 +86,8 @@ app = AsgiFastStream(broker, lifespan=lifespan)
 async def handle(msg: str) -> None: ...
 
 
-# Subscribers without AckPolicy.MANUAL are passed through unchanged
-@broker.subscriber("other-topic", group_id="other-group")
+# ACK_FIRST (FastStream's default) is passed through unchanged, not processed concurrently
+@broker.subscriber("other-topic", group_id="other-group", ack_policy=AckPolicy.ACK_FIRST)
 async def handle_other(msg: str) -> None: ...
 ```
 
@@ -215,9 +216,10 @@ There is no supported way to request redelivery under concurrent processing: the
 offset commits even when your handler raises. See
 [`planning/decisions/2026-07-28-control-signals-not-honoured.md`](planning/decisions/2026-07-28-control-signals-not-honoured.md).
 
-Subscribers that pass through — a `FakeConsumer` under `TestKafkaBroker`, or any
-non-`MANUAL` ack policy — are unaffected, because this library is not managing
-their offsets.
+Subscribers that pass through — a `FakeConsumer` under `TestKafkaBroker`, or
+`AckPolicy.ACK_FIRST` — are unaffected, because this library is not managing
+their offsets. Every other non-`MANUAL` policy is refused before dispatch (see
+below), so it never reaches the guard either.
 
 **Still unguarded:** reaching through the message to the raw consumer, as in
 `msg.consumer.commit()` or `msg.consumer.seek(...)`. The consumer is one shared
@@ -230,7 +232,14 @@ Do not do it.
   them with an explicit `RuntimeError`. The concurrent path is one message → one
   task → one offset.
 - **`ack_policy=AckPolicy.MANUAL` is required** on subscribers you want processed
-  concurrently. Subscribers with any other policy pass through untouched.
+  concurrently. Of the other policies, only `AckPolicy.ACK_FIRST` passes through
+  untouched — its offsets are aiokafka's, via `enable_auto_commit`. `ACK`,
+  `REJECT_ON_ERROR` and `NACK_ON_ERROR` are **refused with a `RuntimeError`**:
+  FastStream builds its own `AcknowledgementMiddleware` for them, which commits
+  the offset as soon as this middleware returns — before the dispatched task has
+  finished — so dispatching them would lose messages. Set
+  `ack_policy=AckPolicy.MANUAL`, or don't register the middleware on that
+  subscriber.
 
 ## Migration from < 0.x
 

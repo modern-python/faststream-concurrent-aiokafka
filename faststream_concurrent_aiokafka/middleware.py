@@ -8,6 +8,7 @@ import weakref
 
 from faststream import BaseMiddleware, ContextRepo
 from faststream.kafka.message import KafkaAckableMessage
+from faststream.middlewares import AckPolicy
 
 from faststream_concurrent_aiokafka import consts
 from faststream_concurrent_aiokafka.batch_committer import CommitterIsDeadError, KafkaBatchCommitter
@@ -34,7 +35,8 @@ _DIRECT_ACK_REASONS: typing.Final[dict[str, str]] = {
         "`consumer.seek()`, rewinding the partition underneath tasks already processing it and "
         "causing duplicate delivery. Concurrent processing has no supported way to request "
         "redelivery - the offset commits even if your handler raises. See "
-        "planning/decisions/2026-07-28-control-signals-not-honoured.md."
+        "https://github.com/modern-python/faststream-concurrent-aiokafka/blob/main/planning/decisions/"
+        "2026-07-28-control-signals-not-honoured.md."
     ),
     "reject": (
         "Do not call `message.reject()` under KafkaConcurrentProcessingMiddleware. For Kafka a "
@@ -50,6 +52,13 @@ def _refuse_direct_ack(method_name: str, *_args: object, **_kwargs: object) -> t
     raise RuntimeError(_DIRECT_ACK_REASONS[method_name])
 
 
+# The guards are constant, so they are built once at import instead of per message: this runs on
+# every dispatched message, and per-message allocation on that path shows up in profiles.
+_ACK_GUARDS: typing.Final[dict[str, typing.Callable[..., typing.Never]]] = {
+    method_name: functools.partial(_refuse_direct_ack, method_name) for method_name in _DIRECT_ACK_REASONS
+}
+
+
 def _install_ack_guards(kafka_message: KafkaAckableMessage) -> None:
     """Shadow ack/nack/reject on this one message so a direct call raises.
 
@@ -61,11 +70,12 @@ def _install_ack_guards(kafka_message: KafkaAckableMessage) -> None:
     *evaluated*, before any `await`, so a caller who forgets to await still gets an error
     rather than an un-awaited-coroutine warning.
 
-    Installed only on the `_Dispatch` route. On pass-through routes the methods must stay
-    intact - FastStream's own AcknowledgementMiddleware calls `ack()` on the non-MANUAL path.
+    Installed only on the `_Dispatch` route. On the pass-through routes the methods must stay
+    intact: `TestKafkaBroker`'s FakeConsumer path acks normally, and under AckPolicy.ACK_FIRST
+    offsets belong to aiokafka's auto-commit, not to us.
     """
-    for method_name in _DIRECT_ACK_REASONS:
-        setattr(kafka_message, method_name, functools.partial(_refuse_direct_ack, method_name))
+    for method_name, guard in _ACK_GUARDS.items():
+        setattr(kafka_message, method_name, guard)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -126,24 +136,40 @@ def _classify(  # noqa: PLR0911 — a flat ordered classifier; one return per br
     attrs: _ConsumerAttrs,
     handler: KafkaConcurrentHandler | None,
     is_batch: bool,
+    ack_policy: AckPolicy | None = None,
 ) -> _Route:
     """Decide how a message routes, as a pure function of its observable signals.
 
     The branch order is load-bearing: a multiply-misconfigured subscriber gets the error of
     the first matching branch (e.g. a batch subscriber is reported before auto-commit).
+
+    `ack_policy` is the subscriber's declared policy, or None when it cannot be determined -
+    in which case the policy is not judged (an undetermined policy never refuses).
     """
     if attrs.is_fake:
         return _PassThrough()
-    # KafkaAckableMessage (AckPolicy.MANUAL) starts with committed=None. KafkaMessage (any
-    # auto-ack policy) starts with committed=AckStatus.ACKED. Non-MANUAL subscribers have
-    # offsets managed by FastStream's own AcknowledgementMiddleware; firing them as background
-    # tasks would ack before the task completes, risking message loss on crash.
+    # Only AckPolicy.ACK_FIRST gets a plain KafkaMessage, which starts with
+    # committed=AckStatus.ACKED; every other policy gets KafkaAckableMessage with committed=None.
+    # ACK_FIRST leaves offsets to aiokafka's auto-commit, so it passes through untouched - and it
+    # never reaches the ack_policy check below.
     if committed is not None:
         return _PassThrough()
     if is_batch:
         return _Refuse(
             "KafkaConcurrentProcessingMiddleware does not support batch subscribers (batch=True). "
             "Use a non-batch subscriber, or remove the middleware from this subscriber."
+        )
+    # Checked before the handler check on purpose: a non-MANUAL subscriber is misconfigured
+    # whether or not concurrent processing was initialised.
+    if ack_policy is not None and ack_policy is not AckPolicy.MANUAL:
+        return _Refuse(
+            "KafkaConcurrentProcessingMiddleware requires ack_policy=AckPolicy.MANUAL on all subscribers; "
+            f"this subscriber declares ack_policy=AckPolicy.{ack_policy.name}. FastStream acknowledges that "
+            "policy itself, issuing a bare `consumer.commit()` as soon as the middleware returns - which is "
+            "before the dispatched task has finished. That commits the consumer's current fetch position past "
+            "every in-flight task, so those messages are never processed and never redelivered. "
+            "Add ack_policy=AckPolicy.MANUAL to your @broker.subscriber(...) decorator, "
+            "or remove the middleware from this subscriber."
         )
     if not handler:
         return _Refuse("Concurrent processing is not running. Call `initialize_concurrent_processing` on app startup.")
@@ -174,11 +200,16 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
             raise RuntimeError(err)
 
         concurrent_processing: typing.Final[KafkaConcurrentHandler] = self.context.get(consts.PROCESSING_CONTEXT_KEY)
+        # FastStream enters the "handler_" scope before any middleware, so the subscriber is
+        # readable here. getattr keeps an absent/None subscriber (e.g. a middleware driven
+        # directly in a test) from raising - an undetermined policy is simply not judged.
+        subscriber: typing.Final = self.context.get("handler_")
         route: typing.Final = _classify(
             committed=kafka_message.committed,
             attrs=_consumer_attrs(kafka_message.consumer),
             handler=concurrent_processing,
             is_batch=isinstance(self.msg, (list, tuple)),
+            ack_policy=getattr(subscriber, "ack_policy", None),
         )
 
         match route:
