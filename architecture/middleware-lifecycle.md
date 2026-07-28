@@ -37,6 +37,31 @@ If the handler has already been stopped, the middleware logs a warning and skips
 the message. The offset stays uncommitted, so the message is redelivered on
 restart.
 
+## Direct-ack guard
+
+On the `_Dispatch` route only, `consume_scope` calls `_install_ack_guards`, which
+shadows `ack`, `nack` and `reject` on that one `KafkaAckableMessage` with
+synchronous functions that raise `RuntimeError`. `StreamMessage` carries a
+`__dict__`, so an instance attribute shadows the class method for this message
+alone; because a handler resolves `KafkaMessage` via `Context("message")` — the
+same object `consume_scope` holds — one mutation covers handlers and inner
+middleware alike.
+
+All three are shadowed, not just `ack`: `reject()` delegates to `self.ack()`, so
+guarding only `ack` would report the wrong method to a `reject()` caller.
+
+The guards are synchronous so they fire while `msg.ack()` is *evaluated*, before
+any `await` — an async guard would degrade an unawaited call to a
+`RuntimeWarning`.
+
+**Route scoping is load-bearing.** Pass-through routes must be left alone:
+FastStream's own `AcknowledgementMiddleware` calls `ack()` on the non-MANUAL path,
+and `TestKafkaBroker`'s `FakeConsumer` path must keep working. Guarding either
+would break code this library does not own.
+
+Reaching through to `msg.consumer` stays unguarded — one shared consumer serves
+every message and partition, so per-message shadowing does not apply.
+
 ## Lifecycle functions
 
 - `initialize_concurrent_processing(context, ...)` creates and starts a handler,

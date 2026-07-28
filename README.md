@@ -198,14 +198,31 @@ or from outside the message-processing path entirely.
 Rationale and the rejected alternatives:
 [`planning/decisions/2026-07-28-control-signals-not-honoured.md`](planning/decisions/2026-07-28-control-signals-not-honoured.md).
 
-### Calling `msg.ack()` / `msg.nack()` directly
+### Calling `msg.ack()` / `msg.nack()` / `msg.reject()` directly
 
-Do not call these from a handler or middleware under this library.
+**These raise `RuntimeError` on the concurrent path.** Offset control belongs to
+`KafkaBatchCommitter`; reaching around it silently loses data, so the middleware
+refuses the call rather than letting it through.
+
 `KafkaAckableMessage.ack()` issues a bare `consumer.commit()` with no offsets,
 committing the consumer's *current fetch position* — past every in-flight task on
-every assigned partition, which silently loses messages. `nack()` issues
-`consumer.seek(...)`, rewinding the partition underneath tasks already
-processing it. Offset control belongs to the batch committer; let it do its job.
+every assigned partition — so those messages are never processed and never
+redelivered. `reject()` is an ack for Kafka and carries the same hazard under an
+opposite-sounding name. `nack()` issues `consumer.seek(...)`, rewinding the
+partition underneath tasks already processing it.
+
+There is no supported way to request redelivery under concurrent processing: the
+offset commits even when your handler raises. See
+[`planning/decisions/2026-07-28-control-signals-not-honoured.md`](planning/decisions/2026-07-28-control-signals-not-honoured.md).
+
+Subscribers that pass through — a `FakeConsumer` under `TestKafkaBroker`, or any
+non-`MANUAL` ack policy — are unaffected, because this library is not managing
+their offsets.
+
+**Still unguarded:** reaching through the message to the raw consumer, as in
+`msg.consumer.commit()` or `msg.consumer.seek(...)`. The consumer is one shared
+object across every message and partition, so it cannot be guarded per message.
+Do not do it.
 
 ### Other
 

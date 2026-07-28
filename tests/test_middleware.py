@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 from faststream.kafka import KafkaBroker, TestKafkaBroker
+from faststream.kafka.message import FakeConsumer, KafkaAckableMessage
 
 from faststream_concurrent_aiokafka.batch_committer import CommitterIsDeadError
 from faststream_concurrent_aiokafka.middleware import (
@@ -22,7 +23,7 @@ from faststream_concurrent_aiokafka.middleware import (
     stop_concurrent_processing,
 )
 from faststream_concurrent_aiokafka.processing import KafkaConcurrentHandler
-from tests.mocks import patched_message
+from tests.mocks import MockAIOKafkaConsumer, MockKafkaMessage, patched_message
 
 
 @pytest_asyncio.fixture
@@ -589,3 +590,117 @@ def test_classify_branch_order_missing_handler_wins_over_auto_commit() -> None:
     route: typing.Final = _classify(committed=None, attrs=_attrs(auto_commit=True), handler=None, is_batch=False)
     assert isinstance(route, _Refuse)
     assert "not running" in route.reason
+
+
+async def test_middleware_guards_direct_ack_calls_on_dispatch(setup_broker: KafkaBroker) -> None:
+    """A dispatched message refuses ack/nack/reject, naming the method that was called."""
+
+    @setup_broker.subscriber("guard-topic", group_id="guard-group")
+    async def handler(msg: typing.Any) -> None: ...
+
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        await initialize_concurrent_processing(
+            context=test_broker.context, commit_batch_size=10, commit_batch_timeout_sec=5
+        )
+        guarded: typing.Final = MockKafkaMessage()
+        try:
+            with patched_message(test_broker, guarded):
+                await test_broker.publish({"id": 1}, topic="guard-topic")
+        finally:
+            await stop_concurrent_processing(test_broker.context)
+
+    for method_name in ("ack", "nack", "reject"):
+        with pytest.raises(RuntimeError, match=method_name):
+            getattr(guarded, method_name)()
+
+
+async def test_middleware_guard_raises_without_await(setup_broker: KafkaBroker) -> None:
+    """The guard is synchronous, so it fires even when the caller forgets to await.
+
+    An async guard would pass every other test in this file and fail only here.
+    """
+
+    @setup_broker.subscriber("guard-sync-topic", group_id="guard-sync-group")
+    async def handler(msg: typing.Any) -> None: ...
+
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        await initialize_concurrent_processing(
+            context=test_broker.context, commit_batch_size=10, commit_batch_timeout_sec=5
+        )
+        guarded: typing.Final = MockKafkaMessage()
+        try:
+            with patched_message(test_broker, guarded):
+                await test_broker.publish({"id": 1}, topic="guard-sync-topic")
+        finally:
+            await stop_concurrent_processing(test_broker.context)
+
+    # No await: a coroutine-returning guard would merely warn here instead of raising.
+    with pytest.raises(RuntimeError, match="ack"):
+        guarded.ack()  # ty: ignore[unresolved-attribute]
+    # And it raises through an await too, since the call raises before the await happens.
+    with pytest.raises(RuntimeError, match="ack"):
+        await guarded.ack()  # ty: ignore[unresolved-attribute]
+
+
+async def test_middleware_does_not_guard_fake_consumer_passthrough(setup_broker: KafkaBroker) -> None:
+    """TestKafkaBroker runs on FakeConsumer and passes through; guarding it would break acks."""
+
+    @setup_broker.subscriber("guard-fake-topic", group_id="guard-fake-group")
+    async def handler(msg: typing.Any) -> None: ...
+
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        untouched: typing.Final = MockKafkaMessage()
+        untouched.consumer = FakeConsumer()  # ty: ignore[invalid-assignment]
+
+        with patched_message(test_broker, untouched):
+            await test_broker.publish({"id": 1}, topic="guard-fake-topic")
+
+    assert "ack" not in vars(untouched)
+    assert "nack" not in vars(untouched)
+    assert "reject" not in vars(untouched)
+
+
+async def test_middleware_does_not_guard_non_manual_ack_passthrough(setup_broker: KafkaBroker) -> None:
+    """Non-MANUAL subscribers pass through; FastStream's AcknowledgementMiddleware acks them.
+
+    Installing guards here would break the framework's own acknowledgement path.
+    """
+
+    @setup_broker.subscriber("guard-auto-topic", group_id="guard-auto-group")
+    async def handler(msg: typing.Any) -> None: ...
+
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        untouched: typing.Final = MockKafkaMessage()
+        untouched.committed = MagicMock()  # non-None means auto-ack
+
+        with patched_message(test_broker, untouched):
+            await test_broker.publish({"id": 1}, topic="guard-auto-topic")
+
+    assert "ack" not in vars(untouched)
+    assert "nack" not in vars(untouched)
+    assert "reject" not in vars(untouched)
+
+
+async def test_middleware_guard_shadows_the_instance_not_the_class(setup_broker: KafkaBroker) -> None:
+    """Guarding one message must leave the class, and every other message, alone."""
+
+    @setup_broker.subscriber("guard-isolation-topic", group_id="guard-isolation-group")
+    async def handler(msg: typing.Any) -> None: ...
+
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        await initialize_concurrent_processing(
+            context=test_broker.context, commit_batch_size=10, commit_batch_timeout_sec=5
+        )
+        guarded: typing.Final = KafkaAckableMessage(raw_message=None, body=b"", consumer=MockAIOKafkaConsumer())
+        try:
+            with patched_message(test_broker, guarded):
+                await test_broker.publish({"id": 1}, topic="guard-isolation-topic")
+        finally:
+            await stop_concurrent_processing(test_broker.context)
+
+    other: typing.Final = KafkaAckableMessage(raw_message=None, body=b"", consumer=MockAIOKafkaConsumer())
+
+    with pytest.raises(RuntimeError, match="ack"):
+        guarded.ack()  # ty: ignore[unused-awaitable]
+    assert "ack" not in vars(other)
+    assert other.ack.__func__ is KafkaAckableMessage.ack

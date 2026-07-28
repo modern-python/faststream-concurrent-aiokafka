@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import dataclasses
+import functools
 import logging
 import typing
 import weakref
@@ -18,6 +19,53 @@ if typing.TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+_DIRECT_ACK_REASONS: typing.Final[dict[str, str]] = {
+    "ack": (
+        "Do not call `message.ack()` under KafkaConcurrentProcessingMiddleware. It issues a bare "
+        "`consumer.commit()`, which commits the consumer's current fetch position - past every "
+        "in-flight task on every assigned partition - so those messages are never processed and "
+        "never redelivered. Offsets are committed by KafkaBatchCommitter once your handler "
+        "returns; remove the call."
+    ),
+    "nack": (
+        "Do not call `message.nack()` under KafkaConcurrentProcessingMiddleware. It issues "
+        "`consumer.seek()`, rewinding the partition underneath tasks already processing it and "
+        "causing duplicate delivery. Concurrent processing has no supported way to request "
+        "redelivery - the offset commits even if your handler raises. See "
+        "planning/decisions/2026-07-28-control-signals-not-honoured.md."
+    ),
+    "reject": (
+        "Do not call `message.reject()` under KafkaConcurrentProcessingMiddleware. For Kafka a "
+        "reject is an ack: it issues a bare `consumer.commit()`, committing the consumer's current "
+        "fetch position past every in-flight task on every assigned partition, so those messages "
+        "are never processed and never redelivered. Offsets are committed by KafkaBatchCommitter "
+        "once your handler returns; remove the call."
+    ),
+}
+
+
+def _refuse_direct_ack(method_name: str, *_args: object, **_kwargs: object) -> typing.Never:
+    raise RuntimeError(_DIRECT_ACK_REASONS[method_name])
+
+
+def _install_ack_guards(kafka_message: KafkaAckableMessage) -> None:
+    """Shadow ack/nack/reject on this one message so a direct call raises.
+
+    `StreamMessage` has a `__dict__`, so an instance attribute shadows the class method for
+    this message alone. Handlers resolve `KafkaMessage` via `Context("message")` - the same
+    object `consume_scope` holds - so one mutation covers handlers and inner middleware.
+
+    The guards are synchronous on purpose: a sync function raises while `msg.ack()` is being
+    *evaluated*, before any `await`, so a caller who forgets to await still gets an error
+    rather than an un-awaited-coroutine warning.
+
+    Installed only on the `_Dispatch` route. On pass-through routes the methods must stay
+    intact - FastStream's own AcknowledgementMiddleware calls `ack()` on the non-MANUAL path.
+    """
+    for method_name in _DIRECT_ACK_REASONS:
+        setattr(kafka_message, method_name, functools.partial(_refuse_direct_ack, method_name))
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -145,6 +193,7 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
                 logger.warning("Kafka middleware. Handler is shutting down, skipping message")
                 return None
             case _Dispatch():
+                _install_ack_guards(kafka_message)
                 try:
                     await concurrent_processing.handle_task(
                         call_next(msg),

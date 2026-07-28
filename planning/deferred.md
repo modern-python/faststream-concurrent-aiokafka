@@ -10,31 +10,6 @@ a ruling in [`decisions/`](decisions/) instead. See
 
 ## Open
 
-### Direct msg.ack() / msg.nack() calls from an inner middleware
-
-_Raised 2026-07-28 (same investigation)._
-
-A middleware that calls the message methods *directly* reaches aiokafka without
-passing through the committer.
-`KafkaAckableMessage.ack()` issues a bare `consumer.commit()` with no offsets
-(`faststream/kafka/message.py:70`), committing the consumer's **current fetch
-position** — past every in-flight task on every assigned partition, which is
-silent message loss. `nack()` issues `consumer.seek(partition, offset)`
-(`kafka/message.py:78-91`), rewinding the fetch position under tasks already
-processing that partition — a redelivery storm that can pin a CPU indefinitely.
-Both defeat the at-least-once control the library exists to provide.
-
-**Deferred because** the only robust guard is wrapping the `StreamMessage`
-handed to inner middleware so `ack`/`nack`/`reject` raise a clear error, which
-is a public-behavior change deserving its own design — and because no such
-usage has been observed, only found by reading.
-
-**Documented meanwhile** in the README's Limitations section, so users are told
-not to do this even though nothing enforces it.
-
-**Trigger:** a report of unexplained message loss, or of duplicate-delivery
-storms, in an app whose middleware touches `msg.ack()` / `msg.nack()`.
-
 ### commit_all flush latency on a transient-error re-queue
 
 _Raised 2026-06-24 (PendingCommits / CommitScheduler reviews)._
