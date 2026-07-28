@@ -12,7 +12,7 @@ a worked example.
 whether there are breaking API changes, and call out any defaults that
 changed behavior — point readers at Upgrade notes.>
 
-Spec: [`planning/changes/<YYYY-MM-DD.NN-slug>/design.md`](../changes/<YYYY-MM-DD.NN-slug>/design.md).
+Spec: [`planning/changes/<YYYY-MM-DD.NN-slug>.md`](../changes/<YYYY-MM-DD.NN-slug>.md).
 
 ## 1. <Behavioral change title> (`<new_param_or_symbol>`)
 
@@ -51,7 +51,10 @@ consumer must know about. Omit section only if truly nothing to note.>
 
 ## Release process
 
-Tag-and-release: publishing runs on a GitHub **release: published** event
-(`.github/workflows/publish.yml` → `just publish`, which sets the version from
-the tag name). Create a GitHub release with tag **`<version>`** (bare, no `v`
-prefix) targeting `main`; the workflow builds and publishes to PyPI.
+Tag-driven (`.github/workflows/release.yml`): pushing a bare semver tag
+**`<version>`** (no `v` prefix) to `main` runs `just publish` — which derives the
+version from the tag name — publishing to PyPI via Trusted Publishing (OIDC) and
+then creating the matching GitHub Release. The tag is the sole entry point; do
+not create the GitHub Release by hand. Curated notes at
+`planning/releases/<tag>.md` are mandatory for a stable tag and must exist at
+the tagged commit, or the workflow fails before anything reaches PyPI.
