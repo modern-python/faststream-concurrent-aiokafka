@@ -45,8 +45,11 @@ Invariants (what must not break):
   under `"concurrent_processing"`; `stop_concurrent_processing` clears it so a
   fresh handler can be initialised. Lifecycle is owned by whoever calls
   init/stop — no module-level state, no signal handlers.
-- **Middleware gates on manual acks.** It passes through FakeConsumer and
-  non-MANUAL-ack subscribers, refuses `_enable_auto_commit=True`, rejects batch
+- **Middleware gates on manual acks.** It dispatches only `AckPolicy.MANUAL`,
+  passes through FakeConsumer and `AckPolicy.ACK_FIRST`, and refuses every other
+  ack policy (`ACK`, `REJECT_ON_ERROR`, `NACK_ON_ERROR` — FastStream builds its
+  own `AcknowledgementMiddleware` for them, which double-commits ahead of
+  in-flight tasks). It also refuses `_enable_auto_commit=True`, rejects batch
   subscribers, and skips (logs, leaves offset uncommitted) once the handler is
   stopped. The `_classify(...) -> _Route` branch *order* is load-bearing.
 - **Bounded shutdown / rebalance flush.** Shutdown is bounded by the committer's
