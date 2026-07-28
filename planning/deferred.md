@@ -12,8 +12,8 @@ in [`changes/active/`](changes/active/); see [CLAUDE.md](../CLAUDE.md#workflow).
 
 _Raised 2026-07-28 (same investigation)._
 
-Distinct from the exception signals above: a middleware that calls the message
-methods *directly* reaches aiokafka without passing through the committer.
+A middleware that calls the message methods *directly* reaches aiokafka without
+passing through the committer.
 `KafkaAckableMessage.ack()` issues a bare `consumer.commit()` with no offsets
 (`faststream/kafka/message.py:70`), committing the consumer's **current fetch
 position** — past every in-flight task on every assigned partition, which is

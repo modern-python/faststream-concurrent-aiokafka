@@ -34,8 +34,11 @@ _UNKNOWN_SIGNAL: typing.Final = SignalPolicy(
 )
 
 # isinstance-matched in order, so a user subclassing a known signal inherits its policy.
-# These six types are siblings under IgnoredException - none subclasses another - so the
-# order between them carries no meaning beyond readability.
+# AckMessage, NackMessage, RejectMessage and SkipMessage sit under HandlerException, which
+# sits under IgnoredException; StopConsume and StopApplication sit directly under
+# IgnoredException. None of these six subclasses another, so the order between them
+# carries no meaning beyond readability. HandlerException itself is not in the table and
+# falls through to the unknown policy.
 _POLICIES: typing.Final[tuple[tuple[type[IgnoredException], SignalPolicy], ...]] = (
     (
         AckMessage,

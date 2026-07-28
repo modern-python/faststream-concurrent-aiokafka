@@ -73,8 +73,11 @@ exception outside the family still ends the task and is logged by `_finish_task`
 The two ERROR-level stop signals are a deliberate gap, not an oversight: an
 application asking to stop will not stop, and the ERROR is the whole mitigation.
 Honouring them needs the subscriber captured from the scoped `"handler_"` context
-at dispatch time and a decision about offset advance that risks partition
-poisoning; see [`planning/deferred.md`](../planning/deferred.md).
+at dispatch time, since that scope is gone by the time the task runs. It also needs
+a decision about offset advance with no good answer: the only existing "do not
+advance" mechanism is the cancelled-task watermark, which is cleared only on
+rebalance, so reusing it would stop every later offset on that partition from
+committing until the group rebalances.
 
 Because the shield is a wrapper, `stop()` can cancel it *before its first step*,
 in which case it never awaited the coroutine it holds. `_finish_task` closes that

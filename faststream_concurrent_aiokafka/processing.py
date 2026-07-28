@@ -37,7 +37,7 @@ async def _absorb_control_signal(coroutine: typing.Awaitable[typing.Any]) -> typ
         return await coroutine
     except IgnoredException as exc:
         policy: typing.Final = classify_signal(exc)
-        logger.log(policy.level, "Kafka middleware. %s", policy.reason)
+        logger.log(policy.level, "Kafka middleware. %s (%s)", policy.reason, type(exc).__name__)
         return None
 
 

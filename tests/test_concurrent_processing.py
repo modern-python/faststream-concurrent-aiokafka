@@ -11,6 +11,7 @@ import pytest
 import pytest_asyncio
 from faststream.exceptions import (
     AckMessage,
+    IgnoredException,
     NackMessage,
     RejectMessage,
     SkipMessage,
@@ -83,7 +84,7 @@ async def test_concurrent_failed_task_exception(
 
     records: typing.Final = [r for r in caplog.records if r.name == "faststream_concurrent_aiokafka.processing"]
     assert "Task has failed with the exception" in records[-1].getMessage()
-    # A genuine failure keeps its traceback; the AckMessage branch must not widen.
+    # A genuine failure keeps its traceback; the control-signal branch must not widen past the family.
     assert records[-1].exc_info is not None
 
 
@@ -151,6 +152,30 @@ async def test_concurrent_control_signal_log_level(  # noqa: PLR0913, PLR0917
     assert signal_cls.__name__ in records[0].getMessage()
 
 
+async def test_concurrent_unknown_control_signal_is_named_in_the_log(
+    handler: KafkaConcurrentHandler,
+    sample_message: MockKafkaMessage,
+    sample_record: MockConsumerRecord,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unrecognised signal is absorbed too, so the log line is the only diagnostic left."""
+    caplog.set_level(logging.DEBUG)
+
+    class FutureSignal(IgnoredException):
+        """Stands in for a control signal a later FastStream release might add."""
+
+    async def coro() -> None:
+        raise FutureSignal
+
+    await handler.handle_task(coro(), sample_record, sample_message)  # ty: ignore[invalid-argument-type]
+    await asyncio.wait([next(iter(handler._tracked_tasks))])
+
+    records: typing.Final = [r for r in caplog.records if r.name == "faststream_concurrent_aiokafka.processing"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+    assert "FutureSignal" in records[0].getMessage()
+
+
 async def test_concurrent_stop_application_does_not_tear_down_the_event_loop(
     handler: KafkaConcurrentHandler, sample_message: MockKafkaMessage, sample_record: MockConsumerRecord
 ) -> None:
@@ -194,7 +219,7 @@ async def test_concurrent_closes_user_coroutine_when_shield_cancelled_before_fir
 async def test_concurrent_real_exception_still_reaches_the_task(
     handler: KafkaConcurrentHandler, sample_message: MockKafkaMessage, sample_record: MockConsumerRecord
 ) -> None:
-    """Only AckMessage is absorbed. A genuine failure must still end the task."""
+    """Only FastStream control signals are absorbed. A genuine failure must still end the task."""
 
     async def coro() -> None:
         error_message = "boom"
