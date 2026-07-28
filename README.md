@@ -43,7 +43,8 @@ pip install faststream-concurrent-aiokafka
 
 `ack_policy=AckPolicy.MANUAL` is **required** on every concurrent subscriber — the middleware enforces this at runtime.
 Without it, FastStream would commit offsets before processing tasks complete, causing silent message loss on crash.
-Subscribers that use other ack policies are automatically passed through without concurrent processing.
+Subscribers on any other ack policy — `ACK_FIRST`, `ACK`, `REJECT_ON_ERROR`, `NACK_ON_ERROR` — are passed through without concurrent processing,
+behaving exactly as they would if this middleware were not registered. That keeps a single broker-level registration safe across a mix of subscribers.
 
 > **`AsgiFastStream` note**: its lifespan receives an app-level `ContextRepo` separate from `broker.context`. Pass `broker.context` explicitly instead of the injected argument.
 
@@ -85,8 +86,9 @@ app = AsgiFastStream(broker, lifespan=lifespan)
 async def handle(msg: str) -> None: ...
 
 
-# Subscribers without AckPolicy.MANUAL are passed through unchanged
-@broker.subscriber("other-topic", group_id="other-group")
+# Any non-MANUAL policy (ACK_FIRST is FastStream's default) is passed through
+# unchanged, not processed concurrently
+@broker.subscriber("other-topic", group_id="other-group", ack_policy=AckPolicy.ACK_FIRST)
 async def handle_other(msg: str) -> None: ...
 ```
 
@@ -198,22 +200,52 @@ or from outside the message-processing path entirely.
 Rationale and the rejected alternatives:
 [`planning/decisions/2026-07-28-control-signals-not-honoured.md`](planning/decisions/2026-07-28-control-signals-not-honoured.md).
 
-### Calling `msg.ack()` / `msg.nack()` directly
+### Calling `msg.ack()` / `msg.nack()` / `msg.reject()` directly
 
-Do not call these from a handler or middleware under this library.
+**These raise `RuntimeError` on the concurrent path.** Offset control belongs to
+`KafkaBatchCommitter`; reaching around it silently loses data, so the middleware
+refuses the call rather than letting it through.
+
 `KafkaAckableMessage.ack()` issues a bare `consumer.commit()` with no offsets,
 committing the consumer's *current fetch position* — past every in-flight task on
-every assigned partition, which silently loses messages. `nack()` issues
-`consumer.seek(...)`, rewinding the partition underneath tasks already
-processing it. Offset control belongs to the batch committer; let it do its job.
+every assigned partition — so those messages are never processed and never
+redelivered. `reject()` is an ack for Kafka and carries the same hazard under an
+opposite-sounding name. `nack()` issues `consumer.seek(...)`, rewinding the
+partition underneath tasks already processing it.
+
+There is no supported way to request redelivery under concurrent processing: the
+offset commits even when your handler raises. See
+[`planning/decisions/2026-07-28-control-signals-not-honoured.md`](planning/decisions/2026-07-28-control-signals-not-honoured.md).
+
+Subscribers that pass through — a `FakeConsumer` under `TestKafkaBroker`, or any
+non-`MANUAL` ack policy — are unaffected, because this library is not managing
+their offsets. The guards are installed only on the concurrent dispatch path, so
+a passed-through subscriber never sees them.
+
+**Still unguarded:** reaching through the message to the raw consumer, as in
+`msg.consumer.commit()` or `msg.consumer.seek(...)`. The consumer is one shared
+object across every message and partition, so it cannot be guarded per message.
+Do not do it.
 
 ### Other
 
-- **Batch subscribers (`batch=True`) are unsupported** — the middleware rejects
-  them with an explicit `RuntimeError`. The concurrent path is one message → one
-  task → one offset.
+- **Batch subscribers (`batch=True`) are unsupported** — a `batch=True`
+  subscriber declaring `AckPolicy.MANUAL` is rejected with an explicit
+  `RuntimeError`. The concurrent path is one message → one task → one offset. A
+  `batch=True` subscriber on any other ack policy simply passes through, since
+  the middleware does not manage it at all.
 - **`ack_policy=AckPolicy.MANUAL` is required** on subscribers you want processed
-  concurrently. Subscribers with any other policy pass through untouched.
+  concurrently. Every other policy passes through untouched, exactly as if the
+  middleware were not registered — that is what makes a single broker-level
+  `add_middleware` call safe across a mix of subscribers. `ACK_FIRST` leaves its
+  offsets to aiokafka's `enable_auto_commit`; `ACK`, `REJECT_ON_ERROR` and
+  `NACK_ON_ERROR` are acknowledged by FastStream's own
+  `AcknowledgementMiddleware` as soon as this middleware returns. That ack is
+  safe on the pass-through path — each FastStream subscriber builds its own
+  `AIOKafkaConsumer`, so it touches only that subscriber's partitions and cannot
+  commit past another subscriber's in-flight work, and with no background task
+  "consumed" and "processed" are the same moment. It would *not* be safe if such
+  a subscriber were dispatched, which is precisely why it is not.
 
 ## Migration from < 0.x
 
