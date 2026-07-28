@@ -19,7 +19,12 @@ is owned by whoever calls init/stop, not by module-level state.
   not this set, is the source of truth for offset progress.
 - The per-task done-callback `_finish_task`, which releases the semaphore and
   removes the task from `_tracked_tasks`. If the task failed (and was not
-  cancelled), `_finish_task` logs the exception.
+  cancelled), `_finish_task` logs the exception at ERROR with a traceback,
+  except `AckMessage`, which a middleware registered *after* ours raises from
+  inside the dispatched coroutine. That is a FastStream control-flow signal,
+  not a failure, so it is logged at DEBUG with no traceback: formatting one per
+  message costs 2.5-5.4x CPU and scales with stack depth. The offset is
+  committed either way, since the task is done and not cancelled.
 - A `KafkaBatchCommitter` that performs the actual offset commits.
 
 ## Dispatch

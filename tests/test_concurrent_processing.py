@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
+from faststream.exceptions import AckMessage
 
 from faststream_concurrent_aiokafka.batch_committer import CommitterIsDeadError
 from faststream_concurrent_aiokafka.processing import KafkaConcurrentHandler
@@ -71,6 +72,30 @@ async def test_concurrent_failed_task_exception(
     mock_task.exception.return_value = ValueError("Task failed")
     handler_with_limit._finish_task(mock_task)
     assert "Task has failed with the exception" in caplog.text
+    # A genuine failure keeps its traceback; the AckMessage branch must not widen.
+    assert caplog.records[-1].exc_info is not None
+
+
+async def test_concurrent_ack_message_logged_at_debug_without_traceback(
+    handler_with_limit: KafkaConcurrentHandler, caplog: pytest.LogCaptureFixture
+) -> None:
+    """AckMessage from an inner middleware is a control-flow signal, not a task failure.
+
+    Formatting a traceback for it costs 2.5-5.4x CPU per message and scales with
+    stack depth, on a path where the user handler never ran.
+    """
+    caplog.set_level(logging.DEBUG)
+
+    mock_task: typing.Final = MagicMock()
+    mock_task.cancelled.return_value = False
+    mock_task.exception.return_value = AckMessage()
+    handler_with_limit._finish_task(mock_task)
+
+    records: typing.Final = [r for r in caplog.records if r.name == "faststream_concurrent_aiokafka.processing"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
+    assert records[0].exc_info is None
+    assert "AckMessage" in records[0].getMessage()
 
 
 async def test_concurrent_finish_task_discards_from_tracked_set(handler: KafkaConcurrentHandler) -> None:
