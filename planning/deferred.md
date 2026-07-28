@@ -11,7 +11,7 @@ in [`changes/active/`](changes/active/); see [CLAUDE.md](../CLAUDE.md#workflow).
 ### Control-flow signals other than AckMessage inside dispatched tasks
 
 _Raised 2026-07-28 (alongside
-[`changes/2026-07-28.01-ack-message-quiet-log.md`](changes/2026-07-28.01-ack-message-quiet-log.md))._
+[`changes/2026-07-28.01-absorb-ack-message-at-dispatch.md`](changes/2026-07-28.01-absorb-ack-message-at-dispatch.md))._
 
 A middleware registered after `KafkaConcurrentProcessingMiddleware` is **inner**
 (FastStream wraps `middlewares[::-1]` in registration order), so anything it
@@ -24,8 +24,11 @@ committer only asks `done() and not cancelled()` — it commits regardless:
   contradicting the user's intent.
 - `StopConsume` / `StopApplication` — never reach `usecase.consume()`, so the
   subscriber never stops and the app never exits.
-- All of them also still pay the ERROR-plus-traceback cost that the AckMessage
-  change removed (2.5-5.4x CPU per message, scaling with stack depth).
+- All of them still end the asyncio task, so they keep the costs the AckMessage
+  shield removed: the ERROR-plus-traceback log (2.5-5.4x CPU per message, scaling
+  with stack depth), the traceback pinning the message body until the offset
+  commits, and visibility to asyncio task-factory wrappers such as sentry_sdk's
+  AsyncioIntegration, which reports them as unhandled errors.
 
 **Deferred because** the fix is not a logging tweak. Honoring "do not advance"
 means reusing the cancelled-task hard boundary, whose watermark is cleared only

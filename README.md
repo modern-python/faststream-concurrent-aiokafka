@@ -100,7 +100,8 @@ A FastStream `BaseMiddleware` subclass. Add it to your broker to enable concurre
 
 The processing engine. Manages:
 - An `asyncio.Semaphore` to enforce `concurrency_limit`
-- In-flight task tracking via a `set[asyncio.Task]`; each task's done-callback releases the semaphore, removes the task from the set, and logs any non-cancellation exception — at ERROR with a traceback, except `AckMessage`, which logs at DEBUG with none
+- In-flight task tracking via a `set[asyncio.Task]`; each task's done-callback releases the semaphore, removes the task from the set, and logs any non-cancellation exception at ERROR with a traceback
+- An `AckMessage` raised by a middleware registered *after* `KafkaConcurrentProcessingMiddleware` (such a middleware runs *inside* the dispatched coroutine) is absorbed before it can end the task, so it neither pins the message body via its traceback nor reaches error reporters that wrap asyncio tasks. The offset is committed either way
 - A `KafkaBatchCommitter` for offset commits
 - An optional `ConsumerRebalanceListener` (via `handler.create_rebalance_listener()`) that flushes pending commits when partitions are revoked
 
