@@ -26,24 +26,38 @@ Pass-through cases (the message is processed normally, not concurrently):
   is the *only* policy that gets a plain `KafkaMessage` (which starts
   `committed=AckStatus.ACKED`); its offsets belong to aiokafka's
   `enable_auto_commit`, so the middleware leaves it alone.
+- any *other* non-`MANUAL` policy, detected from the subscriber's declared
+  `ack_policy`. `ACK`, `REJECT_ON_ERROR` and `NACK_ON_ERROR` get
+  `KafkaAckableMessage` with `committed=None` exactly like `MANUAL`, so they are
+  indistinguishable from it by message shape, but FastStream builds its own
+  `AcknowledgementMiddleware` for them (`auto_ack_disabled` covers only
+  `{MANUAL, ACK_FIRST}`). Dispatched, they would be acked the instant
+  `consume_scope` returns — a bare `consumer.commit()` ahead of every in-flight
+  task — so they must not be dispatched.
 
-After the pass-throughs, batch raw messages
-(`isinstance(self.msg, (list, tuple))`) raise a clear `RuntimeError`: batch
-subscribers are unsupported.
+  They pass through rather than being refused because the middleware is designed
+  to be registered **once at broker level** across a mix of subscribers: a
+  non-`MANUAL` subscriber must behave exactly as if the middleware were absent.
+  Pass-through is safe for the same reason the dispatch was not: each FastStream
+  subscriber builds its own `AIOKafkaConsumer`
+  (`faststream/kafka/subscriber/usecase.py:94`), so a passed-through
+  subscriber's ack touches only its own consumer's partitions and cannot commit
+  past another subscriber's in-flight work — and with no background task,
+  "consumed" and "processed" stay the same moment, as in stock FastStream.
 
-Next — before the handler is even looked at — any ack policy that is not
-`AckPolicy.MANUAL` is refused. `ACK`, `REJECT_ON_ERROR` and `NACK_ON_ERROR` get
-`KafkaAckableMessage` with `committed=None` exactly like `MANUAL`, so they are
-indistinguishable from it by message shape, but FastStream builds its own
-`AcknowledgementMiddleware` for them (`auto_ack_disabled` covers only
-`{MANUAL, ACK_FIRST}`). Dispatched, they would be acked the instant
-`consume_scope` returns — a bare `consumer.commit()` ahead of every in-flight
-task — so they are refused instead. `consume_scope` obtains the policy from
-`self.context.get("handler_")` (FastStream enters that scope before any
-middleware) via `getattr(..., "ack_policy", None)`; a policy that cannot be
-determined is `None` and is never judged. The check precedes the handler check
-deliberately: a non-MANUAL subscriber is misconfigured whether or not
-`initialize_concurrent_processing` has run.
+  `consume_scope` obtains the policy from `self.context.get("handler_")`
+  (FastStream enters that scope before any middleware) via
+  `getattr(..., "ack_policy", None)`; a policy that cannot be determined is
+  `None` and is never assumed to be non-`MANUAL`, so it does not pass through on
+  that basis.
+
+This branch is placed **before every refusal** — deliberately, and the ordering
+is load-bearing. A non-`MANUAL` subscriber is none of this library's business,
+so it must not be rejected for being a batch subscriber, for missing
+`initialize_concurrent_processing`, or for anything else. Only after it does
+`is_batch` (`isinstance(self.msg, (list, tuple))`) raise a clear `RuntimeError`:
+batch subscribers are unsupported *on the concurrent path*, so `batch=True` plus
+`MANUAL` is refused while `batch=True` on another policy passes through cleanly.
 
 The middleware refuses to operate if `_enable_auto_commit=True` on the consumer
 — auto-commit would defeat the at-least-once offset control the handler exists
@@ -73,10 +87,12 @@ any `await` — an async guard would degrade an unawaited call to a
 `RuntimeWarning`.
 
 **Route scoping is load-bearing.** Pass-through routes must be left alone:
-`TestKafkaBroker`'s `FakeConsumer` path acks normally, and under
-`AckPolicy.ACK_FIRST` the offsets are aiokafka's, not ours. Guarding either would
-break code this library does not own. The remaining ack policies never reach the
-guard at all — they are refused before dispatch.
+`TestKafkaBroker`'s `FakeConsumer` path acks normally, under `AckPolicy.ACK_FIRST`
+the offsets are aiokafka's, and under `ACK` / `REJECT_ON_ERROR` /
+`NACK_ON_ERROR` FastStream's own `AcknowledgementMiddleware` acks. Guarding any
+of them would break code this library does not own. Because the guards install
+only on `_Dispatch`, that scoping is automatic — a passed-through subscriber
+never receives them.
 
 Reaching through to `msg.consumer` stays unguarded — one shared consumer serves
 every message and partition, so per-message shadowing does not apply.

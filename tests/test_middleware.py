@@ -322,24 +322,32 @@ async def test_middleware_raises_if_auto_commit_enabled(setup_broker: KafkaBroke
         await stop_concurrent_processing(test_broker.context)
 
 
-async def test_middleware_refuses_ack_policy_read_from_real_subscriber(setup_broker: KafkaBroker) -> None:
+async def test_middleware_ack_policy_read_from_real_subscriber(setup_broker: KafkaBroker) -> None:
     """The ack_policy fed to _classify comes from the real subscriber in context, not a stub.
 
-    Every ack-policy refusal elsewhere in this file drives _classify directly with a
+    Every ack-policy assertion elsewhere in this file drives _classify directly with a
     hand-built ack_policy argument, so none of them would notice if consume_scope's
     `context.get("handler_")` lookup were ever severed (e.g. replaced by a constant
     None). This test declares a real AckPolicy.ACK subscriber and publishes through
-    TestKafkaBroker, so it only passes if that context read is actually wired up.
+    TestKafkaBroker with concurrent processing deliberately *not* initialised: wired up,
+    the policy is read, the subscriber passes through and the handler runs; severed, the
+    policy reads as None, the route falls to the missing-handler branch and RuntimeError
+    is raised instead.
     """
+    processed: typing.Final = []
 
     @setup_broker.subscriber("ack-policy-wiring-topic", group_id="ack-policy-wiring-group", ack_policy=AckPolicy.ACK)
-    async def handler(msg: typing.Any) -> None: ...
+    async def handler(msg: typing.Any) -> None:
+        processed.append(msg)
 
     async with TestKafkaBroker(setup_broker) as test_broker:
-        # committed=None mirrors what AckPolicy.ACK actually yields (KafkaAckableMessage),
-        # so the route reaches the ack_policy check instead of short-circuiting on committed.
-        with patched_message(test_broker), pytest.raises(RuntimeError, match=r"AckPolicy\.ACK\."):
+        # committed=None mirrors what AckPolicy.ACK actually yields (KafkaAckableMessage), and the
+        # mock's consumer is not a FakeConsumer, so the route reaches the ack_policy branch
+        # instead of short-circuiting on either of the two earlier pass-throughs.
+        with patched_message(test_broker):
             await test_broker.publish({"id": 1}, topic="ack-policy-wiring-topic")
+
+    assert processed == [{"id": 1}]
 
 
 async def test_middleware_no_handler_in_context_raises(setup_broker: KafkaBroker) -> None:
@@ -593,72 +601,60 @@ def test_classify_ack_policy_ack_first_passes_through() -> None:
     assert route == _PassThrough()
 
 
-def test_classify_ack_policy_ack_refused() -> None:
+@pytest.mark.parametrize("ack_policy", [AckPolicy.ACK, AckPolicy.REJECT_ON_ERROR, AckPolicy.NACK_ON_ERROR])
+def test_classify_ack_policy_other_than_manual_passes_through(ack_policy: AckPolicy) -> None:
     # ACK/REJECT_ON_ERROR/NACK_ON_ERROR all get KafkaAckableMessage (committed=None) AND
     # FastStream's own AcknowledgementMiddleware, which acks the moment consume_scope returns —
-    # i.e. ahead of the dispatched task. Dispatching them would lose messages, so they are refused.
+    # i.e. ahead of a dispatched task. So they must not be dispatched. They pass through rather
+    # than refuse: broker-level registration must leave non-MANUAL subscribers behaving exactly
+    # as if the middleware were absent, and that is safe because each subscriber owns its own
+    # AIOKafkaConsumer, so its ack cannot commit past another subscriber's in-flight work.
     route: typing.Final = _classify(
-        committed=None, attrs=_attrs(), handler=_handler(is_running=True), is_batch=False, ack_policy=AckPolicy.ACK
+        committed=None, attrs=_attrs(), handler=_handler(is_running=True), is_batch=False, ack_policy=ack_policy
     )
-    assert isinstance(route, _Refuse)
-    assert "AckPolicy.ACK." in route.reason
-    assert "ack_policy=AckPolicy.MANUAL" in route.reason
+    assert route == _PassThrough()
 
 
-def test_classify_ack_policy_reject_on_error_refused() -> None:
-    route: typing.Final = _classify(
-        committed=None,
-        attrs=_attrs(),
-        handler=_handler(is_running=True),
-        is_batch=False,
-        ack_policy=AckPolicy.REJECT_ON_ERROR,
-    )
-    assert isinstance(route, _Refuse)
-    assert "AckPolicy.REJECT_ON_ERROR" in route.reason
-
-
-def test_classify_ack_policy_nack_on_error_refused() -> None:
-    route: typing.Final = _classify(
-        committed=None,
-        attrs=_attrs(),
-        handler=_handler(is_running=True),
-        is_batch=False,
-        ack_policy=AckPolicy.NACK_ON_ERROR,
-    )
-    assert isinstance(route, _Refuse)
-    assert "AckPolicy.NACK_ON_ERROR" in route.reason
-
-
-def test_classify_unknown_ack_policy_is_not_judged() -> None:
-    # ack_policy=None means the subscriber could not be read; an undetermined policy must not
-    # refuse an otherwise well-formed MANUAL-shaped message.
+def test_classify_undetermined_ack_policy_does_not_pass_through() -> None:
+    # ack_policy=None means the subscriber could not be read. An undetermined policy must not be
+    # assumed non-MANUAL: a MANUAL-shaped message still dispatches rather than passing through.
     route: typing.Final = _classify(
         committed=None, attrs=_attrs(), handler=_handler(is_running=True), is_batch=False, ack_policy=None
     )
     assert route == _Dispatch()
 
 
-def test_classify_branch_order_ack_policy_wins_over_missing_handler() -> None:
-    # A non-MANUAL subscriber is misconfigured whether or not concurrent processing was
-    # initialised, so its error precedes the missing-handler one. Pins that ordering.
+def test_classify_ack_policy_pass_through_wins_over_missing_handler() -> None:
+    # A non-MANUAL subscriber is none of this library's business whether or not concurrent
+    # processing was initialised, so it passes through instead of hitting the handler refusal.
     route: typing.Final = _classify(
         committed=None, attrs=_attrs(), handler=None, is_batch=False, ack_policy=AckPolicy.NACK_ON_ERROR
     )
-    assert isinstance(route, _Refuse)
-    assert "AckPolicy.NACK_ON_ERROR" in route.reason
+    assert route == _PassThrough()
 
 
-def test_classify_branch_order_batch_wins_over_ack_policy() -> None:
-    # ...but batch is checked before it, so a batch + non-MANUAL subscriber reports batch.
-    route: typing.Final = _classify(
+def test_classify_batch_non_manual_passes_through_but_batch_manual_is_refused() -> None:
+    # Pins the branch order: the non-MANUAL pass-through sits *before* the batch refusal, so a
+    # batch subscriber on another ack policy is not ours to reject under a broker-level
+    # registration. Batch + MANUAL is still refused.
+    non_manual: typing.Final = _classify(
         committed=None,
         attrs=_attrs(),
         handler=_handler(is_running=True),
         is_batch=True,
         ack_policy=AckPolicy.ACK,
     )
-    assert isinstance(route, _Refuse)
-    assert "batch subscribers" in route.reason
+    assert non_manual == _PassThrough()
+
+    manual: typing.Final = _classify(
+        committed=None,
+        attrs=_attrs(),
+        handler=_handler(is_running=True),
+        is_batch=True,
+        ack_policy=AckPolicy.MANUAL,
+    )
+    assert isinstance(manual, _Refuse)
+    assert "batch subscribers" in manual.reason
 
 
 def test_classify_batch_subscriber_refused() -> None:

@@ -71,8 +71,8 @@ def _install_ack_guards(kafka_message: KafkaAckableMessage) -> None:
     rather than an un-awaited-coroutine warning.
 
     Installed only on the `_Dispatch` route. On the pass-through routes the methods must stay
-    intact: `TestKafkaBroker`'s FakeConsumer path acks normally, and under AckPolicy.ACK_FIRST
-    offsets belong to aiokafka's auto-commit, not to us.
+    intact: `TestKafkaBroker`'s FakeConsumer path acks normally, and every non-MANUAL policy is
+    acknowledged by FastStream itself (or, for ACK_FIRST, by aiokafka's auto-commit).
     """
     for method_name, guard in _ACK_GUARDS.items():
         setattr(kafka_message, method_name, guard)
@@ -107,7 +107,7 @@ def _consumer_attrs(consumer: typing.Any) -> _ConsumerAttrs:  # noqa: ANN401
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class _PassThrough:
-    """Process the message normally — a fake consumer, or an AckPolicy.ACK_FIRST subscriber."""
+    """Process the message normally — a fake consumer, or any subscriber whose ack policy is not MANUAL."""
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -141,35 +141,40 @@ def _classify(  # noqa: PLR0911 — a flat ordered classifier; one return per br
     """Decide how a message routes, as a pure function of its observable signals.
 
     The branch order is load-bearing: a multiply-misconfigured subscriber gets the error of
-    the first matching branch (e.g. a batch subscriber is reported before auto-commit).
+    the first matching branch (e.g. a batch subscriber is reported before auto-commit), and the
+    non-MANUAL pass-through precedes every refusal so that a subscriber this library does not
+    manage is never rejected for anything.
 
-    `ack_policy` is the subscriber's declared policy, or None when it cannot be determined -
-    in which case the policy is not judged (an undetermined policy never refuses).
+    `ack_policy` is the subscriber's declared policy, or None when it cannot be determined - an
+    undetermined policy is never assumed to be non-MANUAL, so it does not pass through here.
     """
     if attrs.is_fake:
         return _PassThrough()
     # Only AckPolicy.ACK_FIRST gets a plain KafkaMessage, which starts with
     # committed=AckStatus.ACKED; every other policy gets KafkaAckableMessage with committed=None.
-    # ACK_FIRST leaves offsets to aiokafka's auto-commit, so it passes through untouched - and it
-    # never reaches the ack_policy check below.
+    # ACK_FIRST leaves offsets to aiokafka's auto-commit, so it passes through untouched.
     if committed is not None:
+        return _PassThrough()
+    # ACK/REJECT_ON_ERROR/NACK_ON_ERROR are message-shape-identical to MANUAL (KafkaAckableMessage,
+    # committed=None), but FastStream builds its own AcknowledgementMiddleware for them
+    # (auto_ack_disabled covers only {MANUAL, ACK_FIRST}), which acks the instant consume_scope
+    # returns. Dispatching them would ack ahead of the in-flight task, so we must not dispatch.
+    # We pass through rather than refuse: the middleware is designed to be registered once at
+    # broker level across a mix of subscribers, so a non-MANUAL subscriber must behave exactly as
+    # if this middleware were absent. That is safe because each FastStream subscriber builds its
+    # own AIOKafkaConsumer (faststream/kafka/subscriber/usecase.py:94), so a passed-through ack
+    # touches only that subscriber's own partitions and cannot commit past another subscriber's
+    # in-flight work - and with no background task, "consumed" and "processed" stay the same
+    # moment, exactly as in stock FastStream.
+    #
+    # This precedes the batch refusal deliberately: a non-MANUAL subscriber is none of this
+    # library's business, so batch=True on one of them is not ours to reject either.
+    if ack_policy is not None and ack_policy is not AckPolicy.MANUAL:
         return _PassThrough()
     if is_batch:
         return _Refuse(
             "KafkaConcurrentProcessingMiddleware does not support batch subscribers (batch=True). "
             "Use a non-batch subscriber, or remove the middleware from this subscriber."
-        )
-    # Checked before the handler check on purpose: a non-MANUAL subscriber is misconfigured
-    # whether or not concurrent processing was initialised.
-    if ack_policy is not None and ack_policy is not AckPolicy.MANUAL:
-        return _Refuse(
-            "KafkaConcurrentProcessingMiddleware requires ack_policy=AckPolicy.MANUAL on all subscribers; "
-            f"this subscriber declares ack_policy=AckPolicy.{ack_policy.name}. FastStream acknowledges that "
-            "policy itself, issuing a bare `consumer.commit()` as soon as the middleware returns - which is "
-            "before the dispatched task has finished. That commits the consumer's current fetch position past "
-            "every in-flight task, so those messages are never processed and never redelivered. "
-            "Add ack_policy=AckPolicy.MANUAL to your @broker.subscriber(...) decorator, "
-            "or remove the middleware from this subscriber."
         )
     if not handler:
         return _Refuse("Concurrent processing is not running. Call `initialize_concurrent_processing` on app startup.")
@@ -202,7 +207,7 @@ class KafkaConcurrentProcessingMiddleware(BaseMiddleware):
         concurrent_processing: typing.Final[KafkaConcurrentHandler] = self.context.get(consts.PROCESSING_CONTEXT_KEY)
         # FastStream enters the "handler_" scope before any middleware, so the subscriber is
         # readable here. getattr keeps an absent/None subscriber (e.g. a middleware driven
-        # directly in a test) from raising - an undetermined policy is simply not judged.
+        # directly in a test) from raising - an undetermined policy is not assumed non-MANUAL.
         subscriber: typing.Final = self.context.get("handler_")
         route: typing.Final = _classify(
             committed=kafka_message.committed,
