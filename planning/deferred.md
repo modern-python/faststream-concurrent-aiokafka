@@ -8,50 +8,12 @@ in [`changes/active/`](changes/active/); see [CLAUDE.md](../CLAUDE.md#workflow).
 
 ## Open
 
-### Control-flow signals other than AckMessage inside dispatched tasks
-
-_Raised 2026-07-28 (alongside
-[`changes/2026-07-28.01-absorb-ack-message-at-dispatch.md`](changes/2026-07-28.01-absorb-ack-message-at-dispatch.md))._
-
-A middleware registered after `KafkaConcurrentProcessingMiddleware` is **inner**
-(FastStream wraps `middlewares[::-1]` in registration order), so anything it
-raises stays inside the fire-and-forget task and never reaches FastStream.
-Under `AckPolicy.MANUAL` no `AcknowledgementMiddleware` is built at all
-(`kafka/subscriber/config.py:44`), so nothing interprets the signal, and the
-committer only asks `done() and not cancelled()` — it commits regardless:
-
-- `NackMessage` / `SkipMessage` — offset committed anyway, silently
-  contradicting the user's intent.
-- `StopConsume` / `StopApplication` — never reach `usecase.consume()`, so the
-  subscriber never stops and the app never exits.
-- All of them still end the asyncio task, so they keep the costs the AckMessage
-  shield removed: the ERROR-plus-traceback log (2.5-5.4x CPU per message, scaling
-  with stack depth), the traceback pinning the message body until the offset
-  commits, and visibility to asyncio task-factory wrappers such as sentry_sdk's
-  AsyncioIntegration, which reports them as unhandled errors.
-
-**Deferred because** the fix is not a logging tweak. Honoring "do not advance"
-means reusing the cancelled-task hard boundary, whose watermark is cleared only
-on rebalance — so one nack would permanently poison a partition. `SkipMessage`
-has the mirror trap: treat it as no-advance and a filtering middleware
-redelivers forever. `StopConsume` additionally needs the subscriber captured
-from the `"handler_"` context scope at dispatch time (the scope is gone by the
-time the task runs), a `weakref` guard against concurrent stop requests, and
-`PendingCommits.clear_watermarks` scoped to the owning consumer id — the change
-its own comment (`_pending_state.py:155-161`) already says a non-shutdown
-cancellation path would require. A design ruling exists for the hardest row:
-nack is to be refused, not emulated.
-
-**Trigger:** a report of a nacked/skipped message being committed anyway, of a
-`StopConsume` that did not stop a subscriber, or of traceback-log CPU from a
-signal other than `AckMessage`.
-
 ### Direct msg.ack() / msg.nack() calls from an inner middleware
 
 _Raised 2026-07-28 (same investigation)._
 
-Distinct from the exception signals above: a middleware that calls the message
-methods *directly* reaches aiokafka without passing through the committer.
+A middleware that calls the message methods *directly* reaches aiokafka without
+passing through the committer.
 `KafkaAckableMessage.ack()` issues a bare `consumer.commit()` with no offsets
 (`faststream/kafka/message.py:70`), committing the consumer's **current fetch
 position** — past every in-flight task on every assigned partition, which is
