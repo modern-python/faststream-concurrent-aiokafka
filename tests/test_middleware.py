@@ -322,6 +322,26 @@ async def test_middleware_raises_if_auto_commit_enabled(setup_broker: KafkaBroke
         await stop_concurrent_processing(test_broker.context)
 
 
+async def test_middleware_refuses_ack_policy_read_from_real_subscriber(setup_broker: KafkaBroker) -> None:
+    """The ack_policy fed to _classify comes from the real subscriber in context, not a stub.
+
+    Every ack-policy refusal elsewhere in this file drives _classify directly with a
+    hand-built ack_policy argument, so none of them would notice if consume_scope's
+    `context.get("handler_")` lookup were ever severed (e.g. replaced by a constant
+    None). This test declares a real AckPolicy.ACK subscriber and publishes through
+    TestKafkaBroker, so it only passes if that context read is actually wired up.
+    """
+
+    @setup_broker.subscriber("ack-policy-wiring-topic", group_id="ack-policy-wiring-group", ack_policy=AckPolicy.ACK)
+    async def handler(msg: typing.Any) -> None: ...
+
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        # committed=None mirrors what AckPolicy.ACK actually yields (KafkaAckableMessage),
+        # so the route reaches the ack_policy check instead of short-circuiting on committed.
+        with patched_message(test_broker), pytest.raises(RuntimeError, match=r"AckPolicy\.ACK\."):
+            await test_broker.publish({"id": 1}, topic="ack-policy-wiring-topic")
+
+
 async def test_middleware_no_handler_in_context_raises(setup_broker: KafkaBroker) -> None:
     @setup_broker.subscriber("no-handler-topic", group_id="no-handler-group", ack_policy=AckPolicy.MANUAL)
     async def handler(msg: typing.Any) -> None: ...
@@ -336,7 +356,7 @@ async def test_middleware_no_handler_in_context_raises(setup_broker: KafkaBroker
 async def test_middleware_non_manual_ack_passes_through_without_concurrent_processing(
     setup_broker: KafkaBroker,
 ) -> None:
-    """Non-MANUAL ack subscribers pass through without requiring concurrent processing.
+    """An AckPolicy.ACK_FIRST subscriber passes through without requiring concurrent processing.
 
     Allows KafkaConcurrentProcessingMiddleware to be registered at broker level
     without breaking auto-ack subscribers.
@@ -762,7 +782,7 @@ async def test_middleware_does_not_guard_fake_consumer_passthrough(setup_broker:
 
 
 async def test_middleware_does_not_guard_non_manual_ack_passthrough(setup_broker: KafkaBroker) -> None:
-    """Non-MANUAL subscribers pass through; FastStream's AcknowledgementMiddleware acks them.
+    """AckPolicy.ACK_FIRST subscribers pass through; FastStream's AcknowledgementMiddleware acks them.
 
     Installing guards here would break the framework's own acknowledgement path.
     """

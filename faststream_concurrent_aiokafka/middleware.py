@@ -107,7 +107,7 @@ def _consumer_attrs(consumer: typing.Any) -> _ConsumerAttrs:  # noqa: ANN401
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class _PassThrough:
-    """Process the message normally — a fake consumer, or a non-MANUAL-ack subscriber."""
+    """Process the message normally — a fake consumer, or an AckPolicy.ACK_FIRST subscriber."""
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
