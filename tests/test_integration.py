@@ -7,7 +7,7 @@ from aiokafka.admin import AIOKafkaAdminClient, NewTopic
 from faststream import BaseMiddleware, ContextRepo
 from faststream.asgi import AsgiFastStream
 from faststream.exceptions import StopApplication
-from faststream.kafka import KafkaBroker, KafkaRouter
+from faststream.kafka import KafkaBroker, KafkaMessage, KafkaRouter
 from faststream.middlewares import AckPolicy
 
 from faststream_concurrent_aiokafka import (
@@ -522,4 +522,47 @@ async def test_real_kafka_stop_application_from_inner_middleware_does_not_kill_t
     # Every later message still reached the handler: the application kept consuming after
     # the signal that used to kill it. This is the regression, not merely "the loop is alive".
     assert seen == n_messages
+    assert [m["id"] for m in processed] == [1, 2]
+
+
+async def test_real_kafka_direct_ack_from_handler_is_refused(kafka_bootstrap_servers: str) -> None:
+    """A handler calling msg.ack() is refused, and the consumer keeps working.
+
+    The bare consumer.commit() that ack() would have issued commits the consumer's current
+    fetch position past every in-flight task, silently losing messages. The guard turns that
+    into a RuntimeError, which fails only the offending message.
+    """
+    processed: typing.Final[list[dict[str, int]]] = []
+    errors: typing.Final[list[str]] = []
+    topic: typing.Final = _topic("directack")
+    broker: typing.Final = _broker(kafka_bootstrap_servers)
+
+    @broker.subscriber(topic, group_id="directack-group", auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
+    async def handler(msg: dict[str, int], message: KafkaMessage) -> None:
+        if msg["id"] == 0:
+            try:
+                await message.ack()
+            except RuntimeError as exc:
+                errors.append(str(exc))
+                raise
+        processed.append(msg)
+
+    await _create_topic(kafka_bootstrap_servers, topic)
+    async with broker:
+        await broker.start()
+        concurrent_handler: typing.Final = await initialize_concurrent_processing(
+            context=broker.context, commit_batch_size=1, commit_batch_timeout_sec=1, concurrency_limit=5
+        )
+        await asyncio.sleep(CONSUMER_READY_SLEEP)
+        try:
+            for message_id in range(3):
+                await broker.publish({"id": message_id}, topic=topic)
+            await asyncio.sleep(POLL_SLEEP)
+            assert concurrent_handler.is_healthy
+        finally:
+            await stop_concurrent_processing(broker.context)
+
+    # Message 0 was refused and never completed; 1 and 2 processed normally.
+    assert len(errors) == 1
+    assert "Do not call `message.ack()`" in errors[0]
     assert [m["id"] for m in processed] == [1, 2]
