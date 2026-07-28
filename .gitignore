@@ -19,3 +19,6 @@ pytest.xml
 .venv
 dist
 uv.lock
+
+# Ephemeral implementation plans (planning/README.md "Plans are ephemeral")
+.superpowers/
