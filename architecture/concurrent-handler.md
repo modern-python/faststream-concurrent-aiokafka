@@ -73,14 +73,13 @@ passed to `AckMessage(**extra_options)` are ignored — the ack here is a batche
 offset commit, not a per-message `message.ack(**extra_options)` call. Every
 exception outside the family still ends the task and is logged by `_finish_task`.
 
-The two ERROR-level stop signals are a deliberate gap, not an oversight: an
-application asking to stop will not stop, and the ERROR is the whole mitigation.
-Honouring them needs the subscriber captured from the scoped `"handler_"` context
-at dispatch time, since that scope is gone by the time the task runs. It also needs
-a decision about offset advance with no good answer: the only existing "do not
-advance" mechanism is the cancelled-task watermark, which is cleared only on
-rebalance, so reusing it would stop every later offset on that partition from
-committing until the group rebalances.
+The three ERROR-level signals are a deliberate gap, not an oversight: a nacked
+message is committed rather than redelivered, a subscriber sent `StopConsume`
+keeps consuming, an application sent `StopApplication` keeps running, and the
+ERROR is the whole mitigation. The rationale and the rejected alternatives live
+in
+[`planning/decisions/2026-07-28-control-signals-not-honoured.md`](../planning/decisions/2026-07-28-control-signals-not-honoured.md),
+which also carries the revisit trigger.
 
 Because the shield is a wrapper, `stop()` can cancel it *before its first step*,
 in which case it never awaited the coroutine it holds. `_finish_task` closes that

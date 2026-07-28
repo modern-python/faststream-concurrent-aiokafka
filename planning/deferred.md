@@ -27,6 +27,9 @@ handed to inner middleware so `ack`/`nack`/`reject` raise a clear error, which
 is a public-behavior change deserving its own design — and because no such
 usage has been observed, only found by reading.
 
+**Documented meanwhile** in the README's Limitations section, so users are told
+not to do this even though nothing enforces it.
+
 **Trigger:** a report of unexplained message loss, or of duplicate-delivery
 storms, in an app whose middleware touches `msg.ack()` / `msg.nack()`.
 
