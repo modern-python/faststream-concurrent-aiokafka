@@ -101,7 +101,7 @@ A FastStream `BaseMiddleware` subclass. Add it to your broker to enable concurre
 The processing engine. Manages:
 - An `asyncio.Semaphore` to enforce `concurrency_limit`
 - In-flight task tracking via a `set[asyncio.Task]`; each task's done-callback releases the semaphore, removes the task from the set, and logs any non-cancellation exception at ERROR with a traceback
-- A FastStream control signal (`AckMessage`, `RejectMessage`, `SkipMessage`, `NackMessage`, `StopConsume`, `StopApplication`) raised by a middleware registered *after* `KafkaConcurrentProcessingMiddleware` (such a middleware runs *inside* the dispatched coroutine) is absorbed before it can end the task, so it neither pins the message body via its traceback nor reaches error reporters that wrap asyncio tasks — and `StopApplication`, which subclasses `SystemExit`, can no longer tear down the event loop. The offset is committed in every case; signals the library cannot honour (`NackMessage`, `StopConsume`, `StopApplication`) are logged at ERROR
+- FastStream control signals raised by a middleware registered *after* this one are absorbed before they can end the task, so they neither pin the message body via a traceback nor reach error reporters that wrap asyncio tasks. See [Limitations](#faststream-control-signals-from-a-middleware-registered-after-this-one) for which are honoured and which only log
 - A `KafkaBatchCommitter` for offset commits
 - An optional `ConsumerRebalanceListener` (via `handler.create_rebalance_listener()`) that flushes pending commits when partitions are revoked
 
@@ -167,6 +167,53 @@ modern_di_faststream.setup_di(app, container=container)  # registered after → 
 4. **Rebalance handling**: When Kafka revokes a partition, the `ConsumerRebalanceListener` (returned by `handler.create_rebalance_listener(flush_timeout_sec=...)`) calls `committer.commit_all()` to flush pending offsets before the partition is reassigned. The flush waits for in-flight handlers up to `flush_timeout_sec` (default 10 s) so a slow handler cannot stall the rebalance past `max.poll.interval.ms`; on timeout, the remaining in-flight messages are redelivered after reassignment (at-least-once). A future optimization may scope the wait to only the revoked partitions.
 
 5. **Shutdown**: `stop_concurrent_processing` cancels every in-flight asyncio task, then awaits `committer.close()`. The committer treats cancelled tasks as a hard offset boundary — cancelled-and-after offsets stay uncommitted and get redelivered on restart. Total wall-clock is sub-second in normal conditions and bounded by `shutdown_timeout_sec` only as a safety net for stuck network commits.
+
+## Limitations
+
+### FastStream control signals from a middleware registered *after* this one
+
+A middleware you register **after** `KafkaConcurrentProcessingMiddleware` runs
+*inside* the coroutine this library dispatches as a background task, so a
+FastStream control signal it raises never reaches FastStream. Every such signal
+is absorbed and the message's offset is committed; what differs is whether the
+library could act on it.
+
+| raised by an inner middleware | effect | logged |
+|---|---|---|
+| `AckMessage` | offset commits — this *is* the ack | DEBUG |
+| `RejectMessage` | offset commits — for Kafka `reject()` is `ack()` | DEBUG |
+| `SkipMessage` | offset commits, processing moves on | DEBUG |
+| `NackMessage` | **not honoured** — offset commits instead of being redelivered | ERROR |
+| `StopConsume` | **not honoured** — the subscriber keeps consuming | ERROR |
+| `StopApplication` | **not honoured** — the application keeps running | ERROR |
+
+The three marked *not honoured* have never worked from a concurrently dispatched
+handler. Before 0.6.4 they failed silently — and `StopApplication`, which
+subclasses `SystemExit`, tore down the event loop outright, losing every
+in-flight offset. They now log a loud ERROR naming the signal instead. If you
+depend on any of them, raise it from a middleware registered **before**
+`KafkaConcurrentProcessingMiddleware` (which runs outside the dispatched task),
+or from outside the message-processing path entirely.
+
+Rationale and the rejected alternatives:
+[`planning/decisions/2026-07-28-control-signals-not-honoured.md`](planning/decisions/2026-07-28-control-signals-not-honoured.md).
+
+### Calling `msg.ack()` / `msg.nack()` directly
+
+Do not call these from a handler or middleware under this library.
+`KafkaAckableMessage.ack()` issues a bare `consumer.commit()` with no offsets,
+committing the consumer's *current fetch position* — past every in-flight task on
+every assigned partition, which silently loses messages. `nack()` issues
+`consumer.seek(...)`, rewinding the partition underneath tasks already
+processing it. Offset control belongs to the batch committer; let it do its job.
+
+### Other
+
+- **Batch subscribers (`batch=True`) are unsupported** — the middleware rejects
+  them with an explicit `RuntimeError`. The concurrent path is one message → one
+  task → one offset.
+- **`ack_policy=AckPolicy.MANUAL` is required** on subscribers you want processed
+  concurrently. Subscribers with any other policy pass through untouched.
 
 ## Migration from < 0.x
 
