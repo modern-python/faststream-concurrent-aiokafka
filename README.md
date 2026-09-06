@@ -134,7 +134,7 @@ Returns the `KafkaConcurrentHandler` instance.
 
 ### `stop_concurrent_processing(context)`
 
-Cancel all in-flight handler tasks, flush completed offsets via the committer, then stop the handler. Uncommitted offsets (from cancelled tasks or anything queued past a cancelled offset) are redelivered on restart — at-least-once.
+Cancel all in-flight tasks, flush completed offsets via the committer, then stop the handler. Uncommitted offsets (from cancelled tasks or anything queued past a cancelled offset) are redelivered on restart — at-least-once.
 
 ### `is_kafka_handler_healthy(context)`
 
@@ -166,7 +166,7 @@ modern_di_faststream.setup_di(app, container=container)  # registered after → 
 
 3. **Offset committing**: Each dispatched task is paired with its Kafka offset and consumer reference and enqueued in `KafkaBatchCommitter`. Once the task completes, the committer groups offsets by partition and calls `consumer.commit(partitions_to_offsets)` with `offset + 1` (Kafka's "next offset to fetch" convention).
 
-4. **Rebalance handling**: When Kafka revokes a partition, the `ConsumerRebalanceListener` (returned by `handler.create_rebalance_listener(flush_timeout_sec=...)`) calls `committer.commit_all()` to flush pending offsets before the partition is reassigned. The flush waits for in-flight handlers up to `flush_timeout_sec` (default 10 s) so a slow handler cannot stall the rebalance past `max.poll.interval.ms`; on timeout, the remaining in-flight messages are redelivered after reassignment (at-least-once). A future optimization may scope the wait to only the revoked partitions.
+4. **Rebalance handling**: When Kafka revokes a partition, the `ConsumerRebalanceListener` (returned by `handler.create_rebalance_listener(flush_timeout_sec=...)`) calls `committer.commit_all()` to flush pending offsets before the partition is reassigned. The flush waits for in-flight tasks up to `flush_timeout_sec` (default 10 s) so a slow handler cannot stall the rebalance past `max.poll.interval.ms`; on timeout, the remaining in-flight messages are redelivered after reassignment (at-least-once). A future optimization may scope the wait to only the revoked partitions.
 
 5. **Shutdown**: `stop_concurrent_processing` cancels every in-flight asyncio task, then awaits `committer.close()`. The committer treats cancelled tasks as a hard offset boundary — cancelled-and-after offsets stay uncommitted and get redelivered on restart. Total wall-clock is sub-second in normal conditions and bounded by `shutdown_timeout_sec` only as a safety net for stuck network commits.
 
@@ -198,7 +198,7 @@ depend on any of them, raise it from a middleware registered **before**
 or from outside the message-processing path entirely.
 
 Rationale and the rejected alternatives:
-[`planning/decisions/2026-07-28-control-signals-not-honoured.md`](planning/decisions/2026-07-28-control-signals-not-honoured.md).
+[ADR-0003](docs/adr/0003-control-signals-not-honoured.md).
 
 ### Calling `msg.ack()` / `msg.nack()` / `msg.reject()` directly
 
@@ -215,7 +215,7 @@ partition underneath tasks already processing it.
 
 There is no supported way to request redelivery under concurrent processing: the
 offset commits even when your handler raises. See
-[`planning/decisions/2026-07-28-control-signals-not-honoured.md`](planning/decisions/2026-07-28-control-signals-not-honoured.md).
+[ADR-0003](docs/adr/0003-control-signals-not-honoured.md).
 
 Subscribers that pass through — a `FakeConsumer` under `TestKafkaBroker`, or any
 non-`MANUAL` ack policy — are unaffected, because this library is not managing
@@ -249,11 +249,11 @@ Do not do it.
 
 ## Migration from < 0.x
 
-Previously, `stop_concurrent_processing` waited up to `2 × shutdown_timeout_sec` for in-flight handlers to drain to completion. The new behavior cancels them immediately. The at-least-once contract is unchanged — uncommitted offsets are redelivered on restart, the same way they always were when the handler crashed mid-task.
+Previously, `stop_concurrent_processing` waited up to `2 × shutdown_timeout_sec` for in-flight tasks to drain to completion. The new behavior cancels them immediately. The at-least-once contract is unchanged — uncommitted offsets are redelivered on restart, the same way they always were when the handler crashed mid-task.
 
 | What changed | Old | New |
 |---|---|---|
-| In-flight handler tasks on stop | drained to completion | **cancelled** |
+| In-flight tasks on stop | drained to completion | **cancelled** |
 | `KafkaConcurrentHandler.wait_for_subtasks()` | public method | removed |
 | `shutdown_timeout_sec` | applied separately to handler and committer | applied to committer only |
 | Signal handler installation | installed automatically | removed — own them via your lifespan / process manager |

@@ -1,9 +1,12 @@
+import inspect
 import typing
 from unittest.mock import AsyncMock
 
+import aiokafka
 import pytest
 from faststream.kafka import TopicPartition
 
+from faststream_concurrent_aiokafka import consts
 from faststream_concurrent_aiokafka.rebalance import ConsumerRebalanceListener
 from tests.mocks import MockKafkaBatchCommitter
 
@@ -88,3 +91,19 @@ async def test_rebalance_clear_runs_after_commit_all(committer: MockKafkaBatchCo
     await listener.on_partitions_revoked(set())
 
     assert order == ["commit_all", "clear"]
+
+
+def test_the_rebalance_flush_default_stays_under_aiokafkas_max_poll_interval() -> None:
+    """INVARIANT: the default revoke-callback flush cannot outlast aiokafka's poll interval.
+
+    `on_partitions_revoked` blocks the rebalance while `commit_all` waits, so a flush budget at or
+    above `max.poll.interval.ms` lets a slow handler get the consumer evicted from the group mid-
+    revoke — the failure the listener exists to prevent, arriving through the listener itself. Two
+    changes break it and neither looks like it touches rebalancing: raising our own default to buy
+    slow handlers more room, or aiokafka lowering its poll interval under us. The bound is read
+    from aiokafka rather than hardcoded so the second one is caught on a dependency bump.
+    """
+    aiokafka_default_sec: typing.Final = (
+        inspect.signature(aiokafka.AIOKafkaConsumer.__init__).parameters["max_poll_interval_ms"].default / 1000
+    )
+    assert aiokafka_default_sec > consts.DEFAULT_REBALANCE_FLUSH_TIMEOUT_SEC

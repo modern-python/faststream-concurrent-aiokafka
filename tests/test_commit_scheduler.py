@@ -1,3 +1,7 @@
+import ast
+import inspect
+import pathlib
+
 from faststream_concurrent_aiokafka._commit_scheduler import CommitScheduler
 
 
@@ -102,3 +106,29 @@ def test_no_trigger_when_idle_below_batch() -> None:
     s.evaluate(now=100.0, absorbed=True, flush_fired=False, stop_requested=False, pending_len=1)
     d = s.evaluate(now=102.0, absorbed=False, flush_fired=False, stop_requested=False, pending_len=2)
     assert d.should_commit is False
+
+
+def test_the_commit_scheduler_reads_no_clock_and_touches_no_asyncio() -> None:
+    """INVARIANT: `_commit_scheduler` decides synchronously, from arguments alone.
+
+    The driver in `batch_committer.py` passes `now = loop.time()` in, and that is the module's
+    only source of time. What breaks this is reaching for convenience: a `time.monotonic()` to
+    avoid threading `now` through one more call, an `asyncio.Event` to signal the driver back, an
+    `async def` on a method that grew an await. Any of those pulls the whole decision surface onto
+    the event loop and costs the reason the split exists — every scheduler test here runs by
+    feeding observation sequences with no loop, no fake clock and no wait-task doubles. See
+    docs/adr/0005-commit-scheduler-decides-the-driver-awaits.md.
+    """
+    tree = ast.parse(pathlib.Path(inspect.getfile(CommitScheduler)).read_text(encoding="utf-8"))
+
+    imported = {
+        alias.name.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
+    } | {node.module.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) if node.module}
+    assert not imported & {"asyncio", "time", "datetime"}, f"clock or asyncio import: {sorted(imported)}"
+
+    awaited = [
+        type(node).__name__
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Await, ast.AsyncFunctionDef, ast.AsyncFor, ast.AsyncWith))
+    ]
+    assert not awaited, f"asynchronous construct in the decider: {awaited}"
