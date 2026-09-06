@@ -8,7 +8,7 @@ decisions deliberately taken (including options rejected) in
 
 Each capability file is an **implementation-detail** page. Its terse
 **invariant summary** ("what must not break") lives in
-[`../CLAUDE.md`](../CLAUDE.md) § Architecture.
+[`../AGENTS.md`](../AGENTS.md) § Architecture.
 
 These files carry **no frontmatter** — they are prose, dated by git.
 
