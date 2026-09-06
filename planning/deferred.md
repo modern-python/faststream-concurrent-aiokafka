@@ -6,7 +6,7 @@ that should bring it back. This is the long-tail register — not a backlog
 of planned work. When an item is picked up it graduates to a change file in
 [`changes/`](changes/); if it is settled *without* being built, it graduates to
 a ruling in [`decisions/`](decisions/) instead. See
-[CLAUDE.md](../CLAUDE.md#workflow).
+[AGENTS.md](../AGENTS.md#workflow).
 
 ## Open
 
