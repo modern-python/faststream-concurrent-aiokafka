@@ -2,77 +2,81 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Project Overview
+
+`faststream-concurrent-aiokafka` gives FastStream's Kafka broker bounded concurrent message
+processing without giving up at-least-once delivery. [`CONTEXT.md`](CONTEXT.md) opens with what it
+does and owns the vocabulary — read it before naming a concept in code, a test name, or an issue
+title. Most of the vocabulary is FastStream's and aiokafka's; only six terms are this package's.
+
 ## Commands
 
-`just --list` is the source of truth; run `just install` after pulling or
-changing `pyproject.toml`. Non-obvious notes:
+`just` (task runner) and `uv` (package manager). The [`justfile`](justfile) is the source of truth —
+`just --list`, or read it. Two things it does not say:
 
-- `just test` / `just test-branch` run in Docker (start Redpanda, run pytest,
-  tear down) — they require Docker.
-- Run one test without Docker via the already-running stack:
-  `uv run --no-sync pytest tests/test_kafka_committer.py -k <name>`.
-- `just lint` auto-fixes; `just lint-ci` is the check-only CI variant (and runs
-  the planning validator).
-
-## Workflow
-
-Planning uses a portable two-axis convention: `architecture/` (repo root) is the
-living **truth home** and promotion target; `planning/changes/` holds the
-per-change files. **Start at the Quick path** in
-[`planning/README.md`](planning/README.md) to choose a lane (Full / Lightweight
-/ Tiny), create a change file, and ship — that file is the authoritative spec. Run
-`just check-planning` to validate changes and `just index` to print the listing.
-Release notes: copy `planning/releases/TEMPLATE.md` to
-`planning/releases/<version>.md` (bare version, no `v` prefix) when cutting a
-release.
+- `just test` needs Docker; it starts Redpanda, runs pytest, and tears down. To run one test
+  against an already-running stack, `uv run --no-sync pytest tests/test_kafka_committer.py -k <name>`.
+- A `ty` suppression is written `# ty: ignore[rule]`, never `# type: ignore`.
 
 ## Architecture
 
-The library provides concurrent Kafka message processing for FastStream. The
-authoritative, code-current account of each capability lives in
-[`architecture/`](architecture/). **When a change alters a capability's
-behavior, update the matching `architecture/<capability>.md` in the same PR** —
-that promotion is what keeps `architecture/` true.
+`faststream_concurrent_aiokafka/` is nine short modules; read the ones you are changing. The one
+thing not visible from any single module is the ownership split inside the committer:
+`_pending_state.py` owns *what* to commit, `_commit_scheduler.py` owns *when*, and
+`batch_committer.py` owns the queue, the backpressure ceiling, and the `consumer.commit()` I/O.
+Both collaborators are synchronous and clock-free by design — see
+[ADR-0005](docs/adr/0005-commit-scheduler-decides-the-driver-awaits.md) before moving anything
+across that seam.
 
-Invariants (what must not break):
+`middleware.py` must stay registerable **once at broker level** across a mix of subscribers: only
+`AckPolicy.MANUAL` is dispatched concurrently and everything else behaves as if the middleware were
+absent ([ADR-0004](docs/adr/0004-non-manual-ack-policies-pass-through.md)). The `_classify` branch
+order is load-bearing and pinned by tests.
 
-- **At-least-once offsets.** Offsets are committed only *after* the user task
-  finishes; a crash, cancellation, or rebalance before completion leaves the
-  offset uncommitted so the message is redelivered. A cancelled task is a hard
-  offset boundary — cancelled-and-after offsets on its partition stay
-  uncommitted.
-- **One handler per init, not a singleton.** A handler lives in `ContextRepo`
-  under `"concurrent_processing"`; `stop_concurrent_processing` clears it so a
-  fresh handler can be initialised. Lifecycle is owned by whoever calls
-  init/stop — no module-level state, no signal handlers.
-- **Middleware gates on manual acks.** It dispatches only `AckPolicy.MANUAL` and
-  passes through FakeConsumer and *every* other ack policy (`ACK_FIRST` on the
-  `committed is not None` branch; `ACK`, `REJECT_ON_ERROR`, `NACK_ON_ERROR` on
-  the explicit `ack_policy` branch — FastStream builds its own
-  `AcknowledgementMiddleware` for those, so they must never be dispatched, but
-  broker-level registration means they must still behave as if the middleware
-  were absent). It refuses `_enable_auto_commit=True`, rejects batch subscribers
-  *on MANUAL only*, and skips (logs, leaves offset uncommitted) once the handler
-  is stopped. The `_classify(...) -> _Route` branch *order* is load-bearing: the
-  non-MANUAL pass-through precedes every refusal.
-- **Bounded shutdown / rebalance flush.** Shutdown is bounded by the committer's
-  `shutdown_timeout_sec` (default 20 s); the rebalance listener's `commit_all`
-  flush is bounded by `flush_timeout_sec` (default 10 s, well under aiokafka's
-  300 s `max.poll.interval.ms`).
-- **Real-broker tests.** Integration tests drive a real Redpanda container; the
-  FastStream/aiokafka harness invariants (start subscribers explicitly,
-  `auto_offset_reset="earliest"`, pre-create topics, etc.) are load-bearing.
+## Workflow
 
-| Capability | File |
+**The spec for a change is its PR body**, not a committed file: why, design, non-goals,
+verification, reviewed with the diff. There is no change file and no lane to choose. A trivial PR
+(typo, dep bump, formatter, CI tweak) ships a conventional-commit title with no body ceremony.
+
+Two things outlive the PR, and there are exactly two places to put them: an alternative **rejected**
+with reasoning becomes an ADR in [`docs/adr/`](docs/adr/) (`NNNN-slug.md`, sequential, with a
+revisit trigger), and real work **not scheduled** becomes a GitHub issue. There is no third state,
+and no separate truth-home directory — a behaviour change is reviewed with the diff, not promoted
+to a page.
+
+### Where a fact goes
+
+Four homes, one owner each:
+
+| Home | Holds |
 |---|---|
-| `KafkaConcurrentHandler` (`processing.py`) — engine, dispatch, shutdown | [`architecture/concurrent-handler.md`](architecture/concurrent-handler.md) |
-| `KafkaBatchCommitter` (`batch_committer.py`) — offset-commit task | [`architecture/batch-committer.md`](architecture/batch-committer.md) |
-| Middleware, init/stop lifecycle, healthcheck (`middleware.py`, `healthcheck.py`) | [`architecture/middleware-lifecycle.md`](architecture/middleware-lifecycle.md) |
-| `ConsumerRebalanceListener` (`rebalance.py`) | [`architecture/rebalance.md`](architecture/rebalance.md) |
-| Real-broker integration-test harness (`tests/test_integration.py`) | [`architecture/integration-tests.md`](architecture/integration-tests.md) |
+| `faststream_concurrent_aiokafka/` | anything readable from the module — the default |
+| a named test | an **invariant**: must stay true, and a change could silently break it |
+| `docs/adr/` | a rejected alternative, with the reasoning that would otherwise be re-litigated |
+| `README.md` | anything a user needs |
+
+Before writing a line anywhere:
+
+> Can an agent get this by reading `faststream_concurrent_aiokafka/`? → **don't write it.**
+> Would a wrong change here fail a test? → it belongs **in the test**, not in prose.
+> Does a user need it? → **`README.md`**.
+> Otherwise it does not get written.
+
+**Prose about mechanism has no home. There is no file to add a paragraph to.** This file included:
+it is always loaded, so a line that restates a docstring, the justfile, or `pyproject.toml` costs
+every turn and rots in two places at once. This package's modules carry unusually dense comments;
+that makes restating them here unusually tempting, and unusually wasteful.
+
+An invariant is a test whose name is the claim, with a docstring opening `INVARIANT:` and a second
+paragraph naming **what breaks it** — design rationale, not a report of what this one test catches.
+Nothing enforces that docstring shape; it is read at review time. A relative link to an ADR *is*
+checked — CI runs lychee `--offline` over every `.md` — but a path named in a docstring or a
+comment is not. Both ADRs and `INVARIANT:` docstrings ratchet: nothing prunes a record once its
+call is settled. Keeping them lean is a standing habit.
 
 ## Conventions
 
-- **Type suppression**: use `# ty: ignore[rule-name]` (not `# type: ignore`).
-- **No `from __future__ import annotations`**: annotations are evaluated eagerly; `typing.Self`/`typing.Never` are used directly (requires Python ≥ 3.11).
+- **No `from __future__ import annotations`**: annotations are evaluated eagerly; `typing.Self` /
+  `typing.Never` are used directly (requires Python ≥ 3.11).
 - **Imports at module level**: no local imports inside functions.

@@ -35,8 +35,8 @@ _DIRECT_ACK_REASONS: typing.Final[dict[str, str]] = {
         "`consumer.seek()`, rewinding the partition underneath tasks already processing it and "
         "causing duplicate delivery. Concurrent processing has no supported way to request "
         "redelivery - the offset commits even if your handler raises. See "
-        "https://github.com/modern-python/faststream-concurrent-aiokafka/blob/main/planning/decisions/"
-        "2026-07-28-control-signals-not-honoured.md."
+        "https://github.com/modern-python/faststream-concurrent-aiokafka/blob/main/docs/adr/"
+        "0003-control-signals-not-honoured.md."
     ),
     "reject": (
         "Do not call `message.reject()` under KafkaConcurrentProcessingMiddleware. For Kafka a "

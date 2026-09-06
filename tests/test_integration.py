@@ -265,7 +265,7 @@ async def test_real_kafka_multiple_subscribers(kafka_bootstrap_servers: str) -> 
 
 
 async def test_real_kafka_shutdown_cancels_in_flight_tasks(kafka_bootstrap_servers: str) -> None:
-    """stop_concurrent_processing cancels in-flight handlers; their offsets are redelivered (at-least-once)."""
+    """stop_concurrent_processing cancels in-flight tasks; their offsets are redelivered (at-least-once)."""
     topic: typing.Final = _topic("shutdown-cancel")
     group: typing.Final = f"shutdown-cancel-group-{uuid.uuid4().hex[:6]}"
     await _create_topic(kafka_bootstrap_servers, topic)
@@ -298,7 +298,7 @@ async def test_real_kafka_shutdown_cancels_in_flight_tasks(kafka_bootstrap_serve
         # Stop while the handler is still sleeping → it must be cancelled, not awaited.
         await stop_concurrent_processing(broker1.context)
 
-    assert cancelled_seen == [True], "in-flight handler was not cancelled on stop"
+    assert cancelled_seen == [True], "in-flight task was not cancelled on stop"
     assert completed_phase1 == [], "handler completed despite shutdown cancellation"
 
     # Phase 2: restart with the same group id → the uncommitted message is redelivered.
