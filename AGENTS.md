@@ -24,13 +24,11 @@ title. Most of the vocabulary is FastStream's and aiokafka's; only six terms are
 thing not visible from any single module is the ownership split inside the committer:
 `_pending_state.py` owns *what* to commit, `_commit_scheduler.py` owns *when*, and
 `batch_committer.py` owns the queue, the backpressure ceiling, and the `consumer.commit()` I/O.
-Both collaborators are synchronous and clock-free by design — see
-[ADR-0005](docs/adr/0005-commit-scheduler-decides-the-driver-awaits.md) before moving anything
-across that seam.
+Both collaborators are synchronous and clock-free by design.
 
 `middleware.py` must stay registerable **once at broker level** across a mix of subscribers: only
 `AckPolicy.MANUAL` is dispatched concurrently and everything else behaves as if the middleware were
-absent ([ADR-0004](docs/adr/0004-non-manual-ack-policies-pass-through.md)). The `_classify` branch
+absent. The `_classify` branch
 order is load-bearing and pinned by tests.
 
 ## Workflow
