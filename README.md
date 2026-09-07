@@ -198,7 +198,7 @@ depend on any of them, raise it from a middleware registered **before**
 or from outside the message-processing path entirely.
 
 Rationale and the rejected alternatives:
-[ADR-0003](docs/adr/0003-control-signals-not-honoured.md).
+[ADR-0003](https://github.com/modern-python/faststream-concurrent-aiokafka/blob/main/docs/adr/0003-control-signals-not-honoured.md).
 
 ### Calling `msg.ack()` / `msg.nack()` / `msg.reject()` directly
 
@@ -215,7 +215,7 @@ partition underneath tasks already processing it.
 
 There is no supported way to request redelivery under concurrent processing: the
 offset commits even when your handler raises. See
-[ADR-0003](docs/adr/0003-control-signals-not-honoured.md).
+[ADR-0003](https://github.com/modern-python/faststream-concurrent-aiokafka/blob/main/docs/adr/0003-control-signals-not-honoured.md).
 
 Subscribers that pass through — a `FakeConsumer` under `TestKafkaBroker`, or any
 non-`MANUAL` ack policy — are unaffected, because this library is not managing
@@ -267,7 +267,7 @@ If your handlers do non-idempotent work that's expensive to repeat, ensure your 
 
 ## 📦 [PyPI](https://pypi.org/project/faststream-concurrent-aiokafka)
 
-## 📝 [License](LICENSE)
+## 📝 [License](https://github.com/modern-python/faststream-concurrent-aiokafka/blob/main/LICENSE)
 
 ## Part of `modern-python`
 
