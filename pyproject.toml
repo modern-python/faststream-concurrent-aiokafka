@@ -87,11 +87,12 @@ isort.no-lines-before = ["standard-library", "local-folder"]
 ]
 
 [tool.pytest.ini_options]
-addopts = "-n auto --cov=. --cov-report term-missing --cov-fail-under=100"
+addopts = "-n auto"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.coverage.report]
+fail_under = 100
 exclude_also = [
     "if typing.TYPE_CHECKING:",
 ]
