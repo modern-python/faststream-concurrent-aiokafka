@@ -45,7 +45,7 @@ jobs:
       - run: uv python install ${{ matrix.python-version }}
       - run: uv python pin ${{ matrix.python-version }}
       - run: uv sync
-      - run: uv run --no-sync pytest . --cov=. --cov-report xml
+      - run: just test-ci
         env:
           KAFKA_BOOTSTRAP_SERVERS: localhost:9092
 
