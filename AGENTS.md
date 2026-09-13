@@ -12,11 +12,9 @@ title. Most of the vocabulary is FastStream's and aiokafka's; only six terms are
 ## Commands
 
 `just` (task runner) and `uv` (package manager). The [`justfile`](justfile) is the source of truth —
-`just --list`, or read it. Two things it does not say:
-
-- `just test` needs Docker; it starts Redpanda, runs pytest, and tears down. To run one test
-  against an already-running stack, `uv run --no-sync pytest tests/test_kafka_committer.py -k <name>`.
-- A `ty` suppression is written `# ty: ignore[rule]`, never `# type: ignore`.
+`just --list`, or read it. The one thing it does not say: `just test` needs Docker; it starts Redpanda,
+runs pytest, and tears down. To run one test against an already-running stack,
+`uv run --no-sync pytest tests/test_kafka_committer.py -k <name>`.
 
 ## Architecture
 
@@ -33,14 +31,9 @@ order is load-bearing and pinned by tests.
 
 ## Workflow
 
-Real work **not scheduled** becomes a GitHub issue.
-
 Every link in `README.md` must be absolute: `https://github.com/modern-python/<repo>/blob/main/<path>`,
 or `.../tree/main/<path>` for a directory. Never a relative path: `README.md` is also the PyPI long
 description, and PyPI does not rewrite relative links, so a relative one 404s on the package page.
-
-An invariant is a test whose name is the claim, with a docstring opening `INVARIANT:` and a second
-paragraph naming **what breaks it** — design rationale, not a report of what this one test catches.
 
 ## Conventions
 
