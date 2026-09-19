@@ -40,3 +40,17 @@ description, and PyPI does not rewrite relative links, so a relative one 404s on
 - **No `from __future__ import annotations`**: annotations are evaluated eagerly; `typing.Self` /
   `typing.Never` are used directly (requires Python ≥ 3.11).
 - **Imports at module level**: no local imports inside functions.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub issues on `modern-python/faststream-concurrent-aiokafka`, via `gh`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles, each label string equal to its name. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
