@@ -36,7 +36,7 @@ _DIRECT_ACK_REASONS: typing.Final[dict[str, str]] = {
         "causing duplicate delivery. Concurrent processing has no supported way to request "
         "redelivery - the offset commits even if your handler raises. See "
         "https://github.com/modern-python/faststream-concurrent-aiokafka/blob/main/docs/adr/"
-        "0003-control-signals-not-honoured.md."
+        "0002-control-signals-not-honoured.md."
     ),
     "reject": (
         "Do not call `message.reject()` under KafkaConcurrentProcessingMiddleware. For Kafka a "

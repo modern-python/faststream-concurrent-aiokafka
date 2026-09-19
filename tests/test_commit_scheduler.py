@@ -117,7 +117,7 @@ def test_the_commit_scheduler_reads_no_clock_and_touches_no_asyncio() -> None:
     `async def` on a method that grew an await. Any of those pulls the whole decision surface onto
     the event loop and costs the reason the split exists — every scheduler test here runs by
     feeding observation sequences with no loop, no fake clock and no wait-task doubles. See
-    docs/adr/0005-commit-scheduler-decides-the-driver-awaits.md.
+    docs/adr/0003-commit-scheduler-decides-the-driver-awaits.md.
     """
     tree = ast.parse(pathlib.Path(inspect.getfile(CommitScheduler)).read_text(encoding="utf-8"))
 
