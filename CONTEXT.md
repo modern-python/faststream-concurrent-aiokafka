@@ -57,4 +57,4 @@ A member of FastStream's `IgnoredException` family — `AckMessage`, `RejectMess
 is FastStream's; the two verbs are this package's. Every signal is **absorbed** (it never ends the
 task); only some are **honoured** (the library does what the signal asks). The words are not
 interchangeable, and the gap between them is a documented limitation, not a bug — see
-[ADR-0003](docs/adr/0003-control-signals-not-honoured.md).
+[ADR-0002](docs/adr/0002-control-signals-not-honoured.md).
