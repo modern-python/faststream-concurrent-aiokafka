@@ -4,7 +4,7 @@ import dataclasses
 import operator
 import typing
 
-from faststream.kafka import TopicPartition
+from aiokafka.structs import TopicPartition
 
 
 _OFFSET_KEY: typing.Final = operator.attrgetter("offset")

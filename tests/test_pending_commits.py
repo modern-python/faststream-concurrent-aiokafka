@@ -1,5 +1,5 @@
 import pytest
-from faststream.kafka import TopicPartition
+from aiokafka.structs import TopicPartition
 
 from faststream_concurrent_aiokafka._pending_state import PendingCommits
 from tests.mocks import MockAIOKafkaConsumer, make_commit_task  # reuse existing helpers

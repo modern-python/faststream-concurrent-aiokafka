@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import aiokafka
 import pytest
-from faststream.kafka import TopicPartition
+from aiokafka.structs import TopicPartition
 
 from faststream_concurrent_aiokafka import consts
 from faststream_concurrent_aiokafka.rebalance import ConsumerRebalanceListener

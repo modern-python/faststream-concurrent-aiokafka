@@ -30,8 +30,7 @@ classifiers = [
 ]
 version = "0"
 dependencies = [
-    # 0.7.6 changes the Kafka ack/commit path this middleware wraps; lift once this adapts.
-    "faststream[kafka]>=0.7.1,<0.7.6",
+    "faststream[kafka]>=0.7.1,<0.8",
 ]
 
 [project.urls]
