@@ -4,6 +4,7 @@ import inspect
 import logging
 import typing
 
+from aiokafka.structs import TopicPartition
 from faststream.exceptions import (
     AckMessage,
     IgnoredException,
@@ -13,7 +14,7 @@ from faststream.exceptions import (
     StopApplication,
     StopConsume,
 )
-from faststream.kafka import ConsumerRecord, TopicPartition
+from faststream.kafka import ConsumerRecord
 from faststream.kafka.message import KafkaAckableMessage
 
 from faststream_concurrent_aiokafka import batch_committer, consts

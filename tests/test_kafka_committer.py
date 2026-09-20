@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 from aiokafka.errors import CommitFailedError, KafkaError
-from faststream.kafka import TopicPartition
+from aiokafka.structs import TopicPartition
 
 from faststream_concurrent_aiokafka import _pending_state
 from faststream_concurrent_aiokafka.batch_committer import (

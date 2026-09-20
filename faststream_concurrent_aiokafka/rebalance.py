@@ -7,7 +7,7 @@ from faststream_concurrent_aiokafka.batch_committer import KafkaBatchCommitter
 
 
 if typing.TYPE_CHECKING:
-    from faststream.kafka import TopicPartition
+    from aiokafka.structs import TopicPartition
 
 
 class ConsumerRebalanceListener(BaseConsumerRebalanceListener):

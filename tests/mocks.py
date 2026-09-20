@@ -4,7 +4,7 @@ import contextlib
 import typing
 from unittest.mock import AsyncMock, Mock
 
-from faststream.kafka import TopicPartition
+from aiokafka.structs import TopicPartition
 
 from faststream_concurrent_aiokafka._pending_state import KafkaCommitTask
 

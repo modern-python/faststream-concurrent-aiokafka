@@ -5,7 +5,7 @@ import logging
 import typing
 
 from aiokafka.errors import CommitFailedError, IllegalStateError, KafkaError
-from faststream.kafka import TopicPartition
+from aiokafka.structs import TopicPartition
 
 from faststream_concurrent_aiokafka import _commit_scheduler, _pending_state, consts
 from faststream_concurrent_aiokafka._pending_state import KafkaCommitTask

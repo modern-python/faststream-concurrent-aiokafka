@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
+from aiokafka.util import commit_structure_validate
 from faststream.exceptions import (
     AckMessage,
     IgnoredException,
@@ -254,6 +255,28 @@ async def test_concurrent_handle_task_dispatches(
     sent_commit_task: typing.Final = handler._committer.send_task.call_args[0][0]  # ty: ignore[unresolved-attribute]
     assert isinstance(sent_commit_task.asyncio_task, asyncio.Task)
     assert len(sent_commit_task.asyncio_task._callbacks) > 0
+
+
+async def test_commit_task_partition_is_the_type_the_client_library_commits(
+    handler: KafkaConcurrentHandler, sample_message: MockKafkaMessage, sample_record: MockConsumerRecord
+) -> None:
+    """INVARIANT: the partition on a commit task is a partition `AIOKafkaConsumer.commit` accepts.
+
+    `commit` gates its offsets dict on `isinstance(key, aiokafka.structs.TopicPartition)` and raises
+    on anything else, so a wrong key type loses the whole batch to redelivery rather than degrading.
+    Importing `TopicPartition` from `faststream.kafka` breaks it: since FastStream 0.7.6 that name is
+    FastStream's own NamedTuple rather than a re-export, and it compares, hashes and unpacks equal to
+    aiokafka's, so every dict lookup in this package still works and only the isinstance gate fails.
+    The gate is invoked here rather than restated so an aiokafka change is caught on a bump.
+    """
+
+    async def coro() -> str:
+        return "result"
+
+    await handler.handle_task(coro(), sample_record, sample_message)  # ty: ignore[invalid-argument-type]
+
+    sent_commit_task: typing.Final = handler._committer.send_task.call_args[0][0]  # ty: ignore[unresolved-attribute]
+    assert commit_structure_validate({sent_commit_task.topic_partition: 0})
 
 
 async def test_concurrent_acquires_limiter_when_limited(
