@@ -57,6 +57,49 @@ jobs:
         env:
           KAFKA_BOOTSTRAP_SERVERS: localhost:9092
 
+  lowest:
+    # The declared floors are part of what we ship, and nothing else in CI installs
+    # them: `pytest` and `scheduled` both resolve highest. This leg resolves the lower
+    # bound instead, on every supported interpreter: a floor's wheel coverage is
+    # per-interpreter, so two interpreters resolving the same versions can still
+    # disagree on whether those versions install.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.14"
+    services:
+      redpanda:
+        image: redpandadata/redpanda:latest
+        ports:
+          - 9092:9092
+        options: >-
+          --health-cmd "rpk cluster health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+      - run: uv python install ${{ matrix.python-version }}
+      - run: uv python pin ${{ matrix.python-version }}
+      # --no-build: a floor with no wheel for this interpreter must fail here rather
+      # than quietly compile its sdist. Without it the leg passes on a floor that
+      # still breaks anyone installing into an image with no build toolchain.
+      - run: uv sync --all-extras --no-install-project --resolution lowest-direct --no-build
+      # --no-cov: the coverage gate rides the resolved-highest leg in `test-ci`. This
+      # one asks whether the floors work, which a coverage failure would only obscure.
+      - run: uv run --no-sync pytest . --no-cov
+        env:
+          KAFKA_BOOTSTRAP_SERVERS: localhost:9092
+
   links:
     runs-on: ubuntu-latest
     steps:
