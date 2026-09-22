@@ -147,8 +147,8 @@ async def test_committer_uses_shutdown_timeout_kwarg() -> None:
     assert committer._shutdown_timeout == 0.05
 
 
-async def test_committer_close_logs_when_task_already_died(caplog: pytest.LogCaptureFixture) -> None:
-    """If the committer task crashed before close() is called, the exception is logged."""
+async def test_committer_close_is_a_noop_when_the_task_already_died() -> None:
+    """close() on an already-dead committer returns quietly; the death was reported when it happened."""
     committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=0.1, commit_batch_size=10)
 
     async def crashing() -> typing.Never:
@@ -160,7 +160,7 @@ async def test_committer_close_logs_when_task_already_died(caplog: pytest.LogCap
         await committer._commit_task
 
     await committer.close()
-    assert "Committer task had already died before close()" in caplog.text
+    assert committer._commit_task.done()
 
 
 async def test_committer_close_but_timeout_error(caplog: pytest.LogCaptureFixture) -> None:
@@ -1344,7 +1344,7 @@ async def test_send_task_unblocks_with_dead_committer_error() -> None:
 async def test_committer_close_when_task_already_finished_cleanly(caplog: pytest.LogCaptureFixture) -> None:
     """close() on a committer whose task already completed normally (not crashed, not cancelled).
 
-    Must return without logging a warning — exercise the exc-is-None branch.
+    Must report nothing — exercise the done-callback's exc-is-None branch.
     """
     committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=0.01, commit_batch_size=10)
     committer.spawn()
@@ -1358,9 +1358,8 @@ async def test_committer_close_when_task_already_finished_cleanly(caplog: pytest
     assert not committer._commit_task.cancelled()
     assert committer._commit_task.exception() is None  # normal exit, not a crash
 
-    # close() must not log "had already died" since there was no exception.
     await committer.close()
-    assert "Committer task had already died before close()" not in caplog.text
+    assert not _death_records(caplog)
 
 
 # ---------- _streaming_iteration: accepts_new_work() is False (post-shutdown loop) ----------
@@ -1406,3 +1405,91 @@ async def test_streaming_skips_queue_task_when_shutdown_in_progress() -> None:
 
     assert not committer.is_healthy
     consumer.commit.assert_called_once_with({tp: 2})
+
+
+# ---------- committer death is reported at the moment it happens ----------
+
+
+def _death_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.name == "faststream_concurrent_aiokafka.batch_committer" and record.levelno == logging.ERROR
+    ]
+
+
+async def test_committer_reports_the_cause_when_the_main_task_dies(caplog: pytest.LogCaptureFixture) -> None:
+    """INVARIANT: the exception that kills the streaming loop is logged at ERROR, carrying itself.
+
+    `_call_committer` handles only `CommitFailedError`, `IllegalStateError` and `KafkaError`;
+    anything else ends `_run_commit_process` and the committer never commits again. Every later
+    message then hits the `send_task` guard and raises `CommitterIsDeadError`, which names the
+    symptom and not the cause. An error reporter that promotes ERROR to an event and keeps lower
+    levels as breadcrumbs would otherwise capture only the guard, which is how a released
+    `TypeError` from `AIOKafkaConsumer.commit` reached production with no cause attached.
+    """
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = TypeError("Key should be TopicPartition instance")
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=0.05, commit_batch_size=1)
+    committer.spawn()
+
+    async def quick() -> None:
+        return None
+
+    await committer.send_task(
+        KafkaCommitTask(
+            asyncio_task=asyncio.create_task(quick()),
+            offset=10,
+            consumer=consumer,
+            topic_partition=TopicPartition(topic="t", partition=0),
+        )
+    )
+
+    assert committer._commit_task is not None
+    await _drive_until(committer._commit_task.done)
+
+    records: typing.Final = _death_records(caplog)
+    assert len(records) == 1
+    exc_info: typing.Final = records[0].exc_info
+    assert exc_info is not None
+    assert isinstance(exc_info[1], TypeError)
+
+
+async def test_committer_death_is_reported_before_any_later_message(caplog: pytest.LogCaptureFixture) -> None:
+    """The cause is on the record before the first CommitterIsDeadError, not after it."""
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = TypeError("Key should be TopicPartition instance")
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=0.05, commit_batch_size=1)
+    committer.spawn()
+
+    async def quick() -> None:
+        return None
+
+    tp: typing.Final = TopicPartition(topic="t", partition=0)
+    await committer.send_task(
+        KafkaCommitTask(asyncio_task=asyncio.create_task(quick()), offset=10, consumer=consumer, topic_partition=tp)
+    )
+
+    assert committer._commit_task is not None
+    await _drive_until(committer._commit_task.done)
+
+    assert _death_records(caplog)
+    assert not committer.is_healthy
+    with pytest.raises(CommitterIsDeadError):
+        await committer.send_task(
+            KafkaCommitTask(asyncio_task=asyncio.create_task(quick()), offset=11, consumer=consumer, topic_partition=tp)
+        )
+
+
+async def test_committer_cancellation_is_not_reported_as_a_death(caplog: pytest.LogCaptureFixture) -> None:
+    """Shutdown cancels the loop; that is not a failure and must not reach an error reporter."""
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=0.05, commit_batch_size=1)
+    committer.spawn()
+
+    assert committer._commit_task is not None
+    committer._commit_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await committer._commit_task
+    await asyncio.sleep(0)
+
+    assert not _death_records(caplog)
