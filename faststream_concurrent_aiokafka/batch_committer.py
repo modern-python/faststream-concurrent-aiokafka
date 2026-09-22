@@ -243,9 +243,24 @@ class KafkaBatchCommitter:
         self._uncommitted_count += 1
         await self._messages_queue.put(new_task)
 
+    def _on_committer_done(self, task: asyncio.Task[typing.Any]) -> None:
+        """Report the exception that ended the streaming loop, at the moment it ends it.
+
+        Without this the only ERROR a dead committer produces is the `send_task` guard's
+        `CommitterIsDeadError`, raised whenever the next message arrives. That names the symptom
+        and not the cause, so an error reporter that promotes ERROR to an event and keeps lower
+        levels as breadcrumbs captures a committer death with nothing attached explaining it.
+        """
+        if task.cancelled():
+            return
+        exc: typing.Final = task.exception()
+        if exc is not None:
+            logger.error("Committer main task died; offsets will no longer be committed", exc_info=exc)
+
     def spawn(self) -> None:
         if not self._commit_task:
             self._commit_task = asyncio.create_task(self._run_commit_process())
+            self._commit_task.add_done_callback(self._on_committer_done)
         else:
             logger.error("Committer main task already running")
 
@@ -256,12 +271,7 @@ class KafkaBatchCommitter:
             return
 
         if self._commit_task.done():
-            # Task already terminated (cancelled or raised). Nothing to wait on; surface
-            # any non-cancellation exception so it gets logged, then continue shutdown.
-            if not self._commit_task.cancelled():
-                exc = self._commit_task.exception()
-                if exc is not None:
-                    logger.warning("Committer task had already died before close()", exc_info=exc)
+            # Nothing to wait on. _on_committer_done already reported any exception.
             return
 
         self._stop_requested = True
