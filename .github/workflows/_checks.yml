@@ -63,6 +63,9 @@ jobs:
     # bound instead, on every supported interpreter: a floor's wheel coverage is
     # per-interpreter, so two interpreters resolving the same versions can still
     # disagree on whether those versions install.
+    # 3.14t is out: no aiokafka release ships a cp314t wheel, so under --no-build this leg
+    # would measure upstream's gap rather than this repo's floor. `pytest` reaches 3.14t
+    # only by building the sdist with AIOKAFKA_NO_EXTENSIONS=1, which --no-build forbids.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
