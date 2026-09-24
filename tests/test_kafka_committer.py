@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from aiokafka.errors import CommitFailedError, KafkaError
+from aiokafka.errors import CommitFailedError, IllegalStateError, KafkaError
 from aiokafka.structs import TopicPartition
 
 from faststream_concurrent_aiokafka import _pending_state
@@ -251,6 +251,65 @@ async def test_committer_ignores_commit_failed_error(
 
     assert result is False
     assert committer._messages_queue.empty()
+
+
+async def test_committer_commits_only_assigned_partitions(committer: KafkaBatchCommitter) -> None:
+    """A revoked partition in the batch must not stop the still-assigned partitions from committing."""
+    assigned_tp: typing.Final = TopicPartition(topic="t", partition=0)
+    revoked_tp: typing.Final = TopicPartition(topic="t", partition=10)
+    consumer: typing.Final = MockAIOKafkaConsumer(assigned={assigned_tp})
+    rc = _pending_state.ReadyCommit(consumer=consumer, offsets={assigned_tp: 11, revoked_tp: 21}, tasks=[])
+
+    result: typing.Final = await committer._call_committer(rc)
+
+    assert result is False
+    consumer.commit.assert_called_once_with({assigned_tp: 11})
+
+
+async def test_committer_skips_commit_when_no_partition_is_assigned(committer: KafkaBatchCommitter) -> None:
+    revoked_tp: typing.Final = TopicPartition(topic="t", partition=10)
+    consumer: typing.Final = MockAIOKafkaConsumer(assigned=set())
+    rc = _pending_state.ReadyCommit(consumer=consumer, offsets={revoked_tp: 21}, tasks=[])
+
+    result: typing.Final = await committer._call_committer(rc)
+
+    assert result is False
+    consumer.commit.assert_not_called()
+    assert committer._messages_queue.empty()
+
+
+async def test_committer_logs_revoked_partitions_as_warning(
+    committer: KafkaBatchCommitter, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Revocation is routine during rebalances, so it must not reach error reporters as an ERROR."""
+    revoked_tp: typing.Final = TopicPartition(topic="t", partition=10)
+    consumer: typing.Final = MockAIOKafkaConsumer(assigned=set())
+    rc = _pending_state.ReadyCommit(consumer=consumer, offsets={revoked_tp: 21}, tasks=[])
+
+    with caplog.at_level(logging.WARNING):
+        await committer._call_committer(rc)
+
+    records: typing.Final = [r for r in caplog.records if r.name == "faststream_concurrent_aiokafka.batch_committer"]
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert str(revoked_tp) in records[0].getMessage()
+
+
+@pytest.mark.parametrize("error", [CommitFailedError(), IllegalStateError()])
+async def test_committer_logs_rebalance_commit_errors_as_warning(
+    committer: KafkaBatchCommitter,
+    mock_consumer: MockAIOKafkaConsumer,
+    sample_task: KafkaCommitTask,
+    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+) -> None:
+    mock_consumer.commit.side_effect = error
+    rc = _pending_state.ReadyCommit(consumer=mock_consumer, offsets={sample_task.topic_partition: 101}, tasks=[])
+
+    with caplog.at_level(logging.WARNING):
+        await committer._call_committer(rc)
+
+    records: typing.Final = [r for r in caplog.records if r.name == "faststream_concurrent_aiokafka.batch_committer"]
+    assert [r.levelno for r in records] == [logging.WARNING]
 
 
 # ---------- map_offsets_per_partition ----------

@@ -86,11 +86,22 @@ class KafkaBatchCommitter:
     async def _call_committer(self, rc: _pending_state.ReadyCommit) -> bool:
         if not rc.offsets:
             return True
+        assigned: typing.Final = rc.consumer.assignment()
+        offsets: typing.Final = {tp: offset for tp, offset in rc.offsets.items() if tp in assigned}
+        revoked: typing.Final = [tp for tp in rc.offsets if tp not in assigned]
+        if revoked:
+            logger.warning(
+                "Skipping commit for partitions no longer assigned to this consumer, "
+                "their messages will be redelivered to the new owner: %s",
+                revoked,
+            )
+        if not offsets:
+            return False
         try:
-            await rc.consumer.commit(rc.offsets)
-        except (CommitFailedError, IllegalStateError):
+            await rc.consumer.commit(offsets)
+        except (CommitFailedError, IllegalStateError) as exc:
             # Partition no longer assigned (rebalance/revocation) — discard batch, not retryable
-            logger.exception("Cannot commit due to partition loss or rebalancing, ignoring batch")
+            logger.warning("Cannot commit due to partition loss or rebalancing, ignoring batch: %r", exc)
             return False
         except KafkaError:
             # Transient error — re-queue batch for retry on next cycle
@@ -100,7 +111,7 @@ class KafkaBatchCommitter:
                 await self._messages_queue.put(task)
             return False
         else:
-            return True
+            return not revoked
 
     async def _commit_ready(self, ready_commits: list[_pending_state.ReadyCommit]) -> bool:
         # One commit per consumer, concurrently — each AIOKafkaConsumer commits its

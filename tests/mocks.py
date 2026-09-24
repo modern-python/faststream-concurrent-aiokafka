@@ -9,10 +9,19 @@ from aiokafka.structs import TopicPartition
 from faststream_concurrent_aiokafka._pending_state import KafkaCommitTask
 
 
+class _EveryPartition:
+    def __contains__(self, _item: object) -> bool:
+        return True
+
+
 class MockAIOKafkaConsumer:
-    def __init__(self, group_id: str = "test-group") -> None:
+    def __init__(self, group_id: str = "test-group", assigned: set[TopicPartition] | None = None) -> None:
         self._group_id = group_id
+        self._assigned = assigned
         self.commit = AsyncMock()
+
+    def assignment(self) -> set[TopicPartition] | _EveryPartition:
+        return _EveryPartition() if self._assigned is None else self._assigned
 
 
 class MockAsyncioTask:
