@@ -5,8 +5,10 @@ from unittest.mock import AsyncMock
 import aiokafka
 import pytest
 from aiokafka.structs import TopicPartition
+from faststream._internal.context import ContextRepo
 
 from faststream_concurrent_aiokafka import consts
+from faststream_concurrent_aiokafka.processing import KafkaConcurrentHandler
 from faststream_concurrent_aiokafka.rebalance import ConsumerRebalanceListener
 from tests.mocks import MockKafkaBatchCommitter
 
@@ -107,3 +109,40 @@ def test_the_rebalance_flush_default_stays_under_aiokafkas_max_poll_interval() -
         inspect.signature(aiokafka.AIOKafkaConsumer.__init__).parameters["max_poll_interval_ms"].default / 1000
     )
     assert aiokafka_default_sec > consts.DEFAULT_REBALANCE_FLUSH_TIMEOUT_SEC
+
+
+async def test_from_context_resolves_a_handler_registered_after_the_listener(
+    committer: MockKafkaBatchCommitter,
+) -> None:
+    """Subscribers are declared before the lifespan creates the handler, so lookup happens on revoke."""
+    context: typing.Final = ContextRepo()
+    listener: typing.Final = ConsumerRebalanceListener.from_context(context, flush_timeout_sec=2.5)
+    handler: typing.Final = KafkaConcurrentHandler(committer=committer)  # ty: ignore[invalid-argument-type]
+    await handler.start()
+    context.set_global(consts.PROCESSING_CONTEXT_KEY, handler)
+    revoked: typing.Final = {TopicPartition(topic="t", partition=0)}
+
+    await listener.on_partitions_revoked(revoked)
+
+    committer.commit_all.assert_called_once_with(2.5)
+    committer.clear_cancellation_watermarks.assert_called_once_with(revoked)
+
+
+async def test_from_context_is_a_noop_without_a_handler() -> None:
+    listener: typing.Final = ConsumerRebalanceListener.from_context(ContextRepo())
+
+    await listener.on_partitions_revoked({TopicPartition(topic="t", partition=0)})
+
+
+async def test_from_context_skips_a_stopped_handler(committer: MockKafkaBatchCommitter) -> None:
+    context: typing.Final = ContextRepo()
+    listener: typing.Final = ConsumerRebalanceListener.from_context(context)
+    context.set_global(
+        consts.PROCESSING_CONTEXT_KEY,
+        KafkaConcurrentHandler(committer=committer),  # ty: ignore[invalid-argument-type]
+    )
+
+    await listener.on_partitions_revoked({TopicPartition(topic="t", partition=0)})
+
+    committer.commit_all.assert_not_called()
+    committer.clear_cancellation_watermarks.assert_not_called()

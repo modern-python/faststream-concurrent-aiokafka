@@ -105,7 +105,7 @@ The processing engine. Manages:
 - In-flight task tracking via a `set[asyncio.Task]`; each task's done-callback releases the semaphore, removes the task from the set, and logs any non-cancellation exception at ERROR with a traceback
 - FastStream control signals raised by a middleware registered *after* this one are absorbed before they can end the task, so they neither pin the message body via a traceback nor reach error reporters that wrap asyncio tasks. See [Limitations](#faststream-control-signals-from-a-middleware-registered-after-this-one) for which are honoured and which only log
 - A `KafkaBatchCommitter` for offset commits
-- An optional `ConsumerRebalanceListener` (via `handler.create_rebalance_listener()`) that flushes pending commits when partitions are revoked
+- A `ConsumerRebalanceListener` on every concurrent subscriber that flushes pending commits when partitions are revoked. `initialize_concurrent_processing` attaches it automatically, including to subscribers declared on routers; see [Rebalance handling](#how-it-works)
 
 This library does **not** install signal handlers — shutdown is driven by your lifespan / process manager calling `stop_concurrent_processing`.
 
@@ -117,7 +117,7 @@ Runs as a background asyncio task. A streaming loop absorbs `KafkaCommitTask` ob
 
 ### `initialize_concurrent_processing(context, ...)`
 
-Create and start the concurrent processing handler; store it in FastStream's context.
+Create and start the concurrent processing handler; store it in FastStream's context; attach a rebalance listener to every concurrent subscriber. Call it before the broker starts.
 
 | Parameter | Default | Description |
 |---|---|---|
@@ -127,6 +127,7 @@ Create and start the concurrent processing handler; store it in FastStream's con
 | `commit_batch_timeout_sec` | `10.0` | Max seconds before flushing a batch |
 | `shutdown_timeout_sec` | `20.0` | Max seconds the batch committer waits for its background task to drain before forcing cancellation |
 | `max_uncommitted_tasks` | `10000` | Max tasks accepted but not yet committed before the consume path blocks (backpressure). `None` disables the bound. |
+| `rebalance_flush_timeout_sec` | `10.0` | Max seconds the attached rebalance listener waits for in-flight tasks when partitions are revoked |
 
 Returns the `KafkaConcurrentHandler` instance.
 
@@ -166,7 +167,7 @@ modern_di_faststream.setup_di(app, container=container)  # registered after → 
 
 3. **Offset committing**: Each dispatched task is paired with its Kafka offset and consumer reference and enqueued in `KafkaBatchCommitter`. Once the task completes, the committer groups offsets by partition and calls `consumer.commit(partitions_to_offsets)` with `offset + 1` (Kafka's "next offset to fetch" convention).
 
-4. **Rebalance handling**: When Kafka revokes a partition, the `ConsumerRebalanceListener` (returned by `handler.create_rebalance_listener(flush_timeout_sec=...)`) calls `committer.commit_all()` to flush pending offsets before the partition is reassigned. The flush waits for in-flight tasks up to `flush_timeout_sec` (default 10 s) so a slow handler cannot stall the rebalance past `max.poll.interval.ms`; on timeout, the remaining in-flight messages are redelivered after reassignment (at-least-once). A future optimization may scope the wait to only the revoked partitions.
+4. **Rebalance handling**: `initialize_concurrent_processing` attaches a `ConsumerRebalanceListener` to every subscriber it processes concurrently: `AckPolicy.MANUAL`, not `batch=True`, subscribed by topic or pattern, on any Kafka broker of the FastStream application in the context, including subscribers from included routers. It must run before the broker starts (in the lifespan, as above), because FastStream hands the listener to aiokafka when the consumer subscribes; if the broker has already started, or the context holds no FastStream application, it logs an ERROR and attaches nothing. A `listener=` you pass yourself is kept and called after the flush. For setups where it cannot attach, pass `listener=ConsumerRebalanceListener.from_context(broker.context)` to the subscriber. When Kafka revokes a partition, the listener calls `committer.commit_all()` to flush pending offsets before the partition is reassigned. The flush waits for in-flight tasks up to `flush_timeout_sec` (default 10 s) so a slow handler cannot stall the rebalance past `max.poll.interval.ms`; on timeout, the remaining in-flight messages are redelivered after reassignment (at-least-once). A future optimization may scope the wait to only the revoked partitions.
 
 5. **Shutdown**: `stop_concurrent_processing` cancels every in-flight asyncio task, then awaits `committer.close()`. The committer treats cancelled tasks as a hard offset boundary — cancelled-and-after offsets stay uncommitted and get redelivered on restart. Total wall-clock is sub-second in normal conditions and bounded by `shutdown_timeout_sec` only as a safety net for stuck network commits.
 

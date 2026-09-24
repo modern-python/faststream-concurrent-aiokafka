@@ -4,7 +4,7 @@ import typing
 import uuid
 
 from aiokafka.admin import AIOKafkaAdminClient, NewTopic
-from faststream import BaseMiddleware, ContextRepo
+from faststream import BaseMiddleware, ContextRepo, FastStream
 from faststream.asgi import AsgiFastStream
 from faststream.exceptions import StopApplication
 from faststream.kafka import KafkaBroker, KafkaMessage, KafkaRouter
@@ -566,3 +566,67 @@ async def test_real_kafka_direct_ack_from_handler_is_refused(kafka_bootstrap_ser
     assert len(errors) == 1
     assert "Do not call `message.ack()`" in errors[0]
     assert [m["id"] for m in processed] == [1, 2]
+
+
+async def _committed_offsets(bootstrap_servers: str, group_id: str) -> dict[int, int]:
+    admin: typing.Final = AIOKafkaAdminClient(bootstrap_servers=bootstrap_servers)
+    await admin.start()
+    try:
+        offsets: typing.Final = await admin.list_consumer_group_offsets(group_id)
+    finally:
+        await admin.close()
+    return {tp.partition: meta.offset for tp, meta in offsets.items() if meta.offset >= 0}
+
+
+async def _join_group_and_wait_for_commit(bootstrap_servers: str, topic: str, group: str) -> dict[int, int]:
+    """Join `group` with a second member, forcing a rebalance, and poll until an offset is committed."""
+    broker: typing.Final = KafkaBroker(bootstrap_servers)
+
+    @broker.subscriber(topic, group_id=group, auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
+    async def handler(_msg: dict[str, int]) -> None: ...
+
+    async with broker:
+        await broker.start()
+        deadline: typing.Final = asyncio.get_running_loop().time() + 20
+        committed: dict[int, int] = {}
+        while not committed and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+            committed = await _committed_offsets(bootstrap_servers, group)
+        return committed
+
+
+async def test_real_kafka_attached_listener_commits_on_rebalance(kafka_bootstrap_servers: str) -> None:
+    """The listener attached by initialize_concurrent_processing flushes finished work when a member joins.
+
+    The batch size and timeout are far out of reach, so the only thing that can commit the offset
+    while both brokers are running is the revoke callback.
+    """
+    topic: typing.Final = _topic("rebalance")
+    group: typing.Final = f"rebalance-group-{uuid.uuid4().hex[:6]}"
+    processed: typing.Final = asyncio.Event()
+    broker: typing.Final = _broker(kafka_bootstrap_servers)
+    FastStream(broker)
+
+    @broker.subscriber(topic, group_id=group, auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
+    async def handler(_msg: dict[str, int]) -> None:
+        processed.set()
+
+    await _create_topic(kafka_bootstrap_servers, topic)
+    async with broker:
+        await initialize_concurrent_processing(
+            context=broker.context, commit_batch_size=100, commit_batch_timeout_sec=600, concurrency_limit=5
+        )
+        try:
+            await broker.start()
+            await asyncio.sleep(CONSUMER_READY_SLEEP)
+            await broker.publish({"id": 1}, topic=topic)
+            await asyncio.wait_for(processed.wait(), timeout=POLL_SLEEP)
+            assert await _committed_offsets(kafka_bootstrap_servers, group) == {}
+
+            # A separate task keeps Python 3.11's coverage tracer on this frame once the second broker stops.
+            joined: typing.Final = asyncio.create_task(
+                _join_group_and_wait_for_commit(kafka_bootstrap_servers, topic, group)
+            )
+            assert await joined == {0: 1}
+        finally:
+            await stop_concurrent_processing(broker.context)

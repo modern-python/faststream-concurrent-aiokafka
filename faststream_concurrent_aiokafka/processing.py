@@ -166,6 +166,10 @@ class KafkaConcurrentHandler:
         return ConsumerRebalanceListener(self._committer, flush_timeout_sec)
 
     @property
+    def committer(self) -> KafkaBatchCommitter:
+        return self._committer
+
+    @property
     def is_healthy(self) -> bool:
         return self._is_running and self._committer.is_healthy
 
