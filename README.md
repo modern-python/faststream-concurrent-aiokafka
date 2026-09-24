@@ -55,6 +55,7 @@ from faststream.asgi import AsgiFastStream
 from faststream.kafka import KafkaBroker
 from faststream.middlewares import AckPolicy
 from faststream_concurrent_aiokafka import (
+    ConsumerRebalanceListener,
     KafkaConcurrentProcessingMiddleware,
     initialize_concurrent_processing,
     stop_concurrent_processing,
@@ -82,7 +83,14 @@ async def lifespan(_context: ContextRepo):
 app = AsgiFastStream(broker, lifespan=lifespan)
 
 
-@broker.subscriber("my-topic", group_id="my-group", ack_policy=AckPolicy.MANUAL)
+@broker.subscriber(
+    "my-topic",
+    group_id="my-group",
+    ack_policy=AckPolicy.MANUAL,
+    # Flush finished work when partitions are revoked; the handler is looked up in the
+    # context on each revocation, so it may be created later by the lifespan.
+    listener=ConsumerRebalanceListener.from_context(broker.context),
+)
 async def handle(msg: str) -> None: ...
 
 
@@ -105,7 +113,7 @@ The processing engine. Manages:
 - In-flight task tracking via a `set[asyncio.Task]`; each task's done-callback releases the semaphore, removes the task from the set, and logs any non-cancellation exception at ERROR with a traceback
 - FastStream control signals raised by a middleware registered *after* this one are absorbed before they can end the task, so they neither pin the message body via a traceback nor reach error reporters that wrap asyncio tasks. See [Limitations](#faststream-control-signals-from-a-middleware-registered-after-this-one) for which are honoured and which only log
 - A `KafkaBatchCommitter` for offset commits
-- An optional `ConsumerRebalanceListener` (via `handler.create_rebalance_listener()`) that flushes pending commits when partitions are revoked
+- A `ConsumerRebalanceListener` that flushes pending commits when partitions are revoked. Pass `ConsumerRebalanceListener.from_context(broker.context)` as each concurrent subscriber's `listener=`; it finds the running handler at revocation time, so it can be declared before `initialize_concurrent_processing` runs. `handler.create_rebalance_listener()` builds one bound to an existing handler. Without a listener, finished work on revoked partitions is not committed and is redelivered to the new owner after every rebalance
 
 This library does **not** install signal handlers — shutdown is driven by your lifespan / process manager calling `stop_concurrent_processing`.
 
@@ -166,7 +174,7 @@ modern_di_faststream.setup_di(app, container=container)  # registered after → 
 
 3. **Offset committing**: Each dispatched task is paired with its Kafka offset and consumer reference and enqueued in `KafkaBatchCommitter`. Once the task completes, the committer groups offsets by partition and calls `consumer.commit(partitions_to_offsets)` with `offset + 1` (Kafka's "next offset to fetch" convention).
 
-4. **Rebalance handling**: When Kafka revokes a partition, the `ConsumerRebalanceListener` (returned by `handler.create_rebalance_listener(flush_timeout_sec=...)`) calls `committer.commit_all()` to flush pending offsets before the partition is reassigned. The flush waits for in-flight tasks up to `flush_timeout_sec` (default 10 s) so a slow handler cannot stall the rebalance past `max.poll.interval.ms`; on timeout, the remaining in-flight messages are redelivered after reassignment (at-least-once). A future optimization may scope the wait to only the revoked partitions.
+4. **Rebalance handling**: When Kafka revokes a partition, the `ConsumerRebalanceListener` (from `ConsumerRebalanceListener.from_context(context, flush_timeout_sec=...)` or `handler.create_rebalance_listener(flush_timeout_sec=...)`) calls `committer.commit_all()` to flush pending offsets before the partition is reassigned. The flush waits for in-flight tasks up to `flush_timeout_sec` (default 10 s) so a slow handler cannot stall the rebalance past `max.poll.interval.ms`; on timeout, the remaining in-flight messages are redelivered after reassignment (at-least-once). A future optimization may scope the wait to only the revoked partitions.
 
 5. **Shutdown**: `stop_concurrent_processing` cancels every in-flight asyncio task, then awaits `committer.close()`. The committer treats cancelled tasks as a hard offset boundary — cancelled-and-after offsets stay uncommitted and get redelivered on restart. Total wall-clock is sub-second in normal conditions and bounded by `shutdown_timeout_sec` only as a safety net for stuck network commits.
 
