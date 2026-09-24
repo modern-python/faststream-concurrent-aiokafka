@@ -4,14 +4,13 @@ import typing
 import uuid
 
 from aiokafka.admin import AIOKafkaAdminClient, NewTopic
-from faststream import BaseMiddleware, ContextRepo
+from faststream import BaseMiddleware, ContextRepo, FastStream
 from faststream.asgi import AsgiFastStream
 from faststream.exceptions import StopApplication
 from faststream.kafka import KafkaBroker, KafkaMessage, KafkaRouter
 from faststream.middlewares import AckPolicy
 
 from faststream_concurrent_aiokafka import (
-    ConsumerRebalanceListener,
     KafkaConcurrentProcessingMiddleware,
     initialize_concurrent_processing,
     stop_concurrent_processing,
@@ -579,8 +578,8 @@ async def _committed_offsets(bootstrap_servers: str, group_id: str) -> dict[int,
     return {tp.partition: meta.offset for tp, meta in offsets.items() if meta.offset >= 0}
 
 
-async def test_real_kafka_listener_from_context_commits_on_rebalance(kafka_bootstrap_servers: str) -> None:
-    """A listener declared before the handler exists flushes finished work when a new member joins.
+async def test_real_kafka_attached_listener_commits_on_rebalance(kafka_bootstrap_servers: str) -> None:
+    """The listener attached by initialize_concurrent_processing flushes finished work when a member joins.
 
     The batch size and timeout are far out of reach, so the only thing that can commit the offset
     while both brokers are running is the revoke callback.
@@ -590,13 +589,9 @@ async def test_real_kafka_listener_from_context_commits_on_rebalance(kafka_boots
     processed: typing.Final = asyncio.Event()
     broker1: typing.Final = _broker(kafka_bootstrap_servers)
 
-    @broker1.subscriber(
-        topic,
-        group_id=group,
-        auto_offset_reset="earliest",
-        ack_policy=AckPolicy.MANUAL,
-        listener=ConsumerRebalanceListener.from_context(broker1.context),
-    )
+    FastStream(broker1)
+
+    @broker1.subscriber(topic, group_id=group, auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
     async def handler1(_msg: dict[str, int]) -> None:
         processed.set()
 
@@ -621,11 +616,9 @@ async def test_real_kafka_listener_from_context_commits_on_rebalance(kafka_boots
                 await broker2.start()
                 deadline: typing.Final = asyncio.get_running_loop().time() + 20
                 committed: dict[int, int] = {}
-                while asyncio.get_running_loop().time() < deadline:
-                    committed = await _committed_offsets(kafka_bootstrap_servers, group)
-                    if committed:
-                        break
+                while not committed and asyncio.get_running_loop().time() < deadline:
                     await asyncio.sleep(0.5)
+                    committed = await _committed_offsets(kafka_bootstrap_servers, group)
                 assert committed == {0: 1}
         finally:
             await stop_concurrent_processing(broker1.context)

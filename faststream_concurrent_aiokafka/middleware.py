@@ -10,7 +10,7 @@ from faststream import BaseMiddleware, ContextRepo
 from faststream.kafka.message import KafkaAckableMessage
 from faststream.middlewares import AckPolicy
 
-from faststream_concurrent_aiokafka import consts
+from faststream_concurrent_aiokafka import consts, rebalance
 from faststream_concurrent_aiokafka.batch_committer import CommitterIsDeadError, KafkaBatchCommitter
 from faststream_concurrent_aiokafka.processing import KafkaConcurrentHandler
 
@@ -259,6 +259,7 @@ async def initialize_concurrent_processing(  # noqa: PLR0913, PLR0917
     commit_batch_timeout_sec: float = consts.DEFAULT_COMMIT_BATCH_TIMEOUT_SEC,
     shutdown_timeout_sec: float = consts.DEFAULT_SHUTDOWN_TIMEOUT_SEC,
     max_uncommitted_tasks: int | None = consts.DEFAULT_MAX_UNCOMMITTED_TASKS,
+    rebalance_flush_timeout_sec: float = consts.DEFAULT_REBALANCE_FLUSH_TIMEOUT_SEC,
 ) -> KafkaConcurrentHandler:
     existing: KafkaConcurrentHandler | None = context.get(consts.PROCESSING_CONTEXT_KEY)
     if existing and existing.is_running:
@@ -276,6 +277,7 @@ async def initialize_concurrent_processing(  # noqa: PLR0913, PLR0917
     )
     await concurrent_processing.start()
     context.set_global(consts.PROCESSING_CONTEXT_KEY, concurrent_processing)
+    rebalance.attach_rebalance_listeners(context, rebalance_flush_timeout_sec)
     logger.info("Kafka middleware. Concurrent processing is active")
     return concurrent_processing
 
