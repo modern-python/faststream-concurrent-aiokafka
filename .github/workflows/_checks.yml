@@ -57,7 +57,7 @@ jobs:
         env:
           KAFKA_BOOTSTRAP_SERVERS: localhost:9092
 
-  lowest:
+  floors:
     # The declared floors are part of what we ship, and nothing else in CI installs
     # them: `pytest` and `scheduled` both resolve highest. This leg resolves the lower
     # bound instead, on every supported interpreter: a floor's wheel coverage is
@@ -66,6 +66,7 @@ jobs:
     # 3.14t is out: no aiokafka release ships a cp314t wheel, so under --no-build this leg
     # would measure upstream's gap rather than this repo's floor. `pytest` reaches 3.14t
     # only by building the sdist with AIOKAFKA_NO_EXTENSIONS=1, which --no-build forbids.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
