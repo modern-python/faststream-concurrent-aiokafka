@@ -882,8 +882,8 @@ async def _drive_until(predicate: typing.Callable[[], bool], deadline_sec: float
         if predicate():
             return
         await asyncio.sleep(poll)
-    msg: typing.Final = "predicate did not become true in time"  # pragma: no cover
-    raise AssertionError(msg)  # pragma: no cover
+    msg: typing.Final = "predicate did not become true in time"  # pragma: no cover - only when the predicate times out
+    raise AssertionError(msg)  # pragma: no cover - only when the predicate times out
 
 
 async def test_streaming_commits_when_batch_size_reached() -> None:
