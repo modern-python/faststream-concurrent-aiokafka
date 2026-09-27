@@ -12,8 +12,8 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "**/pyproject.toml"
-      - run: uv python install 3.13
-      - run: uv python pin 3.13
+      - run: uv python install 3.11
+      - run: uv python pin 3.11
       - run: just install lint-ci
 
   pytest:
@@ -49,7 +49,7 @@ jobs:
           cache-dependency-glob: "**/pyproject.toml"
       - run: uv python install ${{ matrix.python-version }}
       - run: uv python pin ${{ matrix.python-version }}
-      - run: uv sync
+      - run: just install
       - name: Confirm the interpreter is free-threaded
         if: matrix.python-version == '3.14t'
         run: uv run --no-sync python -c "import sys, faststream_concurrent_aiokafka; assert not sys._is_gil_enabled(), 'GIL is enabled on a t-build'"
