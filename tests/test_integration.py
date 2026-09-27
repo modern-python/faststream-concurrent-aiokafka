@@ -376,11 +376,11 @@ async def test_real_kafka_multi_subscriber_commits_all_offsets(kafka_bootstrap_s
     broker2: typing.Final = _broker(kafka_bootstrap_servers)
 
     @broker2.subscriber(topic_a, group_id=group_a, auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
-    async def handler_a2(msg: dict[str, int]) -> None:  # pragma: no cover
+    async def handler_a2(msg: dict[str, int]) -> None:  # pragma: no cover - runs only on a replay; asserted empty below
         replayed_a.append(msg["id"])
 
     @broker2.subscriber(topic_b, group_id=group_b, auto_offset_reset="earliest", ack_policy=AckPolicy.MANUAL)
-    async def handler_b2(msg: dict[str, int]) -> None:  # pragma: no cover
+    async def handler_b2(msg: dict[str, int]) -> None:  # pragma: no cover - runs only on a replay; asserted empty below
         replayed_b.append(msg["id"])
 
     async with broker2:
