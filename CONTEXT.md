@@ -40,10 +40,11 @@ this middleware were absent, while a skipped message is dropped mid-shutdown wit
 uncommitted for redelivery. They sound alike and their offset consequences are opposite.
 
 **Ready prefix**:
-The leading contiguous run of finished tasks on one partition — the only offsets eligible to
-commit, and all `ready` ever means in `take_ready` / `ReadyCommit` / `extract_ready_prefixes`. It
+The leading contiguous run of finished tasks on one partition for one consumer — the only offsets
+eligible to commit, and all `ready` ever means in `take_ready` / `ReadyCommit` / `extract_ready_prefixes`. It
 is not "the finished tasks": a single unfinished task at the head holds back every finished task
-behind it, which is what keeps commits from jumping past in-flight work.
+behind it on that consumer, which is what keeps commits from jumping past in-flight work. Another
+consumer's tasks on the same partition, in a different consumer group, never hold it back.
 
 **Cancellation watermark**:
 The per-`(consumer, partition)` floor recorded when a cancelled task is seen, past which offsets

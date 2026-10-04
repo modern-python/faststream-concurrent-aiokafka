@@ -8,6 +8,8 @@ from aiokafka.structs import TopicPartition
 
 
 _OFFSET_KEY: typing.Final = operator.attrgetter("offset")
+# (id(consumer), partition): one owner of a partition. Pending lists and watermarks share it.
+OwnerKey: typing.TypeAlias = tuple[int, TopicPartition]
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
@@ -28,9 +30,9 @@ def insert_sorted(partition_pending: list[KafkaCommitTask], new_ct: KafkaCommitT
 
 
 def extract_ready_prefixes(
-    pending: dict[TopicPartition, list[KafkaCommitTask]],
-) -> tuple[dict[TopicPartition, list[KafkaCommitTask]], int]:
-    # Pending lists are maintained in offset order by insert_sorted. Per partition, find
+    pending: dict[OwnerKey, list[KafkaCommitTask]],
+) -> tuple[dict[OwnerKey, list[KafkaCommitTask]], int]:
+    # Pending lists are maintained in offset order by insert_sorted. Per owner, find
     # the first not-done task; tasks before it form the contiguous-done prefix and become
     # "ready". A cancelled task is treated as a hard boundary: cancelled + everything after
     # is dropped from pending and added to ready (so task_done() balances
@@ -38,10 +40,10 @@ def extract_ready_prefixes(
     # the cancelled task so the uncommitted offsets get redelivered on restart
     # (at-least-once). Returns (ready, count) so the caller can update its cached
     # pending_count without re-summing list lengths.
-    ready: dict[TopicPartition, list[KafkaCommitTask]] = {}
+    ready: dict[OwnerKey, list[KafkaCommitTask]] = {}
     ready_count = 0
-    empty_partitions: list[TopicPartition] = []
-    for partition, partition_pending in pending.items():
+    empty_owners: list[OwnerKey] = []
+    for owner, partition_pending in pending.items():
         prefix_end = 0
         for index, task in enumerate(partition_pending):
             if task.asyncio_task.cancelled():
@@ -53,21 +55,21 @@ def extract_ready_prefixes(
             prefix_end = index + 1
 
         if prefix_end > 0:
-            ready[partition] = partition_pending[:prefix_end]
+            ready[owner] = partition_pending[:prefix_end]
             ready_count += prefix_end
             del partition_pending[:prefix_end]
         if not partition_pending:
-            empty_partitions.append(partition)
+            empty_owners.append(owner)
 
-    for k in empty_partitions:
-        del pending[k]
+    for owner in empty_owners:
+        del pending[owner]
     return ready, ready_count
 
 
 def map_offsets_per_partition(
     consumer_id: int,
     consumer_tasks: list[KafkaCommitTask],
-    watermarks: dict[tuple[int, TopicPartition], int],
+    watermarks: dict[OwnerKey, int],
 ) -> dict[TopicPartition, int]:
     # `watermarks` is mutated: any cancelled task seen here records (or lowers) the
     # (consumer, partition) watermark. Subsequent batches for the same consumer will see
@@ -79,7 +81,7 @@ def map_offsets_per_partition(
 
     partitions_to_offsets: dict[TopicPartition, int] = {}
     for partition, tasks in by_partition.items():
-        wm_key: tuple[int, TopicPartition] = (consumer_id, partition)
+        wm_key: OwnerKey = (consumer_id, partition)
         max_offset: int | None = None
         for task in sorted(tasks, key=_OFFSET_KEY):
             if task.asyncio_task.cancelled():
@@ -112,7 +114,7 @@ class ReadyCommit:
 
 
 class PendingCommits:
-    """Owns per-partition pending commit tasks, held failed commits, pending count, and cancellation watermarks.
+    """Owns per-owner pending commit tasks, held failed commits, pending count, and cancellation watermarks.
 
     Synchronous and single-owner: the committer's streaming loop is the sole
     mutator, so no locking is needed. Reads asyncio task state (done/cancelled)
@@ -120,9 +122,9 @@ class PendingCommits:
     """
 
     def __init__(self) -> None:
-        self._pending: dict[TopicPartition, list[KafkaCommitTask]] = {}
+        self._pending: dict[OwnerKey, list[KafkaCommitTask]] = {}
         self._count: int = 0
-        self._watermarks: dict[tuple[int, TopicPartition], int] = {}
+        self._watermarks: dict[OwnerKey, int] = {}
         # Commits that hit a transient error; take_ready() returns them again, merged per consumer.
         self._held: list[ReadyCommit] = []
 
@@ -130,7 +132,7 @@ class PendingCommits:
         return self._count
 
     def absorb(self, ct: KafkaCommitTask) -> None:
-        insert_sorted(self._pending.setdefault(ct.topic_partition, []), ct)
+        insert_sorted(self._pending.setdefault((id(ct.consumer), ct.topic_partition), []), ct)
         self._count += 1
 
     def hold(self, rc: ReadyCommit) -> None:

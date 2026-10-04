@@ -528,7 +528,7 @@ def test_committer_map_offsets_advances_to_max_per_partition(mock_consumer: Mock
 
 
 def test_extract_ready_prefixes_empty_pending() -> None:
-    pending: dict[TopicPartition, list[KafkaCommitTask]] = {}
+    pending: dict[_pending_state.OwnerKey, list[KafkaCommitTask]] = {}
     ready, ready_count = _pending_state.extract_ready_prefixes(pending)
     assert ready == {}
     assert ready_count == 0
@@ -537,6 +537,7 @@ def test_extract_ready_prefixes_empty_pending() -> None:
 
 def test_extract_ready_prefixes_all_done(mock_consumer: MockAIOKafkaConsumer) -> None:
     tp: typing.Final = TopicPartition(topic="t", partition=0)
+    owner: typing.Final = (id(mock_consumer), tp)
     tasks: typing.Final = [
         KafkaCommitTask(
             asyncio_task=MockAsyncioTask(done=True),  # ty: ignore[invalid-argument-type]
@@ -546,17 +547,18 @@ def test_extract_ready_prefixes_all_done(mock_consumer: MockAIOKafkaConsumer) ->
         )
         for offset in (10, 11, 12)
     ]
-    pending: dict[TopicPartition, list[KafkaCommitTask]] = {tp: list(tasks)}
+    pending: dict[_pending_state.OwnerKey, list[KafkaCommitTask]] = {owner: list(tasks)}
 
     ready, ready_count = _pending_state.extract_ready_prefixes(pending)
 
-    assert ready == {tp: tasks}
+    assert ready == {owner: tasks}
     assert ready_count == 3
     assert pending == {}  # partition emptied
 
 
 def test_extract_ready_prefixes_blocks_on_first_pending(mock_consumer: MockAIOKafkaConsumer) -> None:
     tp: typing.Final = TopicPartition(topic="t", partition=0)
+    owner: typing.Final = (id(mock_consumer), tp)
     pending_task: typing.Final = MockAsyncioTask(done=False)
     tasks: typing.Final = [
         KafkaCommitTask(
@@ -578,13 +580,13 @@ def test_extract_ready_prefixes_blocks_on_first_pending(mock_consumer: MockAIOKa
             topic_partition=tp,
         ),
     ]
-    pending: dict[TopicPartition, list[KafkaCommitTask]] = {tp: list(tasks)}
+    pending: dict[_pending_state.OwnerKey, list[KafkaCommitTask]] = {owner: list(tasks)}
 
     ready, ready_count = _pending_state.extract_ready_prefixes(pending)
 
-    assert ready == {tp: [tasks[0]]}  # only the prefix before offset 11
+    assert ready == {owner: [tasks[0]]}  # only the prefix before offset 11
     assert ready_count == 1
-    assert pending[tp] == [tasks[1], tasks[2]]
+    assert pending[owner] == [tasks[1], tasks[2]]
 
 
 def test_extract_ready_prefixes_cancelled_drops_partition(mock_consumer: MockAIOKafkaConsumer) -> None:
@@ -594,6 +596,7 @@ def test_extract_ready_prefixes_cancelled_drops_partition(mock_consumer: MockAIO
     separately stops the offset advance at the cancelled task so it gets redelivered.
     """
     tp: typing.Final = TopicPartition(topic="t", partition=0)
+    owner: typing.Final = (id(mock_consumer), tp)
     tasks: typing.Final = [
         KafkaCommitTask(
             asyncio_task=MockAsyncioTask(done=True),  # ty: ignore[invalid-argument-type]
@@ -614,11 +617,11 @@ def test_extract_ready_prefixes_cancelled_drops_partition(mock_consumer: MockAIO
             topic_partition=tp,
         ),
     ]
-    pending: dict[TopicPartition, list[KafkaCommitTask]] = {tp: list(tasks)}
+    pending: dict[_pending_state.OwnerKey, list[KafkaCommitTask]] = {owner: list(tasks)}
 
     ready, ready_count = _pending_state.extract_ready_prefixes(pending)
 
-    assert ready == {tp: tasks}  # all three included in ready
+    assert ready == {owner: tasks}  # all three included in ready
     assert ready_count == 3
     assert pending == {}  # partition emptied
 
@@ -1693,3 +1696,26 @@ async def test_a_streak_of_transient_errors_logs_one_error(caplog: pytest.LogCap
     assert all(r.exc_info is None for r in warnings)
     assert len(infos) == 1
     await committer.close()
+
+
+async def test_another_consumer_groups_in_flight_task_does_not_delay_a_commit() -> None:
+    group_a: typing.Final = MockAIOKafkaConsumer(group_id="a")
+    group_b: typing.Final = MockAIOKafkaConsumer(group_id="b")
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=0.05, commit_batch_size=100)
+    committer.spawn()
+    in_flight: typing.Final = asyncio.create_task(_never_finishes())
+    await committer.send_task(_commit_task(group_a, 0, in_flight))
+    await committer.send_task(
+        KafkaCommitTask(
+            asyncio_task=asyncio.create_task(_finishes()),
+            offset=101,
+            consumer=group_b,
+            topic_partition=TopicPartition(topic="t", partition=0),
+        )
+    )
+
+    await _drive_until(lambda: group_b.commit.call_count >= 1, deadline_sec=0.5)
+
+    assert group_b.commit.call_args.args[0] == {TopicPartition(topic="t", partition=0): 102}
+    group_a.commit.assert_not_called()
+    await _cancel_all(committer, in_flight)
