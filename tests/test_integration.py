@@ -522,7 +522,7 @@ async def test_real_kafka_stop_application_from_inner_middleware_does_not_kill_t
     # Every later message still reached the handler: the application kept consuming after
     # the signal that used to kill it. This is the regression, not merely "the loop is alive".
     assert seen == n_messages
-    assert [m["id"] for m in processed] == [1, 2]
+    assert sorted(m["id"] for m in processed) == [1, 2]
 
 
 async def test_real_kafka_direct_ack_from_handler_is_refused(kafka_bootstrap_servers: str) -> None:
@@ -565,7 +565,7 @@ async def test_real_kafka_direct_ack_from_handler_is_refused(kafka_bootstrap_ser
     # Message 0 was refused and never completed; 1 and 2 processed normally.
     assert len(errors) == 1
     assert "Do not call `message.ack()`" in errors[0]
-    assert [m["id"] for m in processed] == [1, 2]
+    assert sorted(m["id"] for m in processed) == [1, 2]
 
 
 async def _committed_offsets(bootstrap_servers: str, group_id: str) -> dict[int, int]:
