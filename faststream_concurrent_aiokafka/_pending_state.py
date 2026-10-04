@@ -20,8 +20,7 @@ class KafkaCommitTask:
 
 def insert_sorted(partition_pending: list[KafkaCommitTask], new_ct: KafkaCommitTask) -> None:
     # Common case: tasks arrive from the broker in offset order, so append is correct and
-    # the list stays sorted. Out-of-order arrivals only happen when _call_committer
-    # re-queues a batch on transient KafkaError; bisect handles the rare case in O(log N).
+    # the list stays sorted; bisect handles a rare out-of-order arrival in O(log N).
     if not partition_pending or partition_pending[-1].offset <= new_ct.offset:
         partition_pending.append(new_ct)
     else:
@@ -113,7 +112,7 @@ class ReadyCommit:
 
 
 class PendingCommits:
-    """Owns per-partition pending commit tasks, pending count, and cancellation watermarks.
+    """Owns per-partition pending commit tasks, held failed commits, pending count, and cancellation watermarks.
 
     Synchronous and single-owner: the committer's streaming loop is the sole
     mutator, so no locking is needed. Reads asyncio task state (done/cancelled)
@@ -124,6 +123,8 @@ class PendingCommits:
         self._pending: dict[TopicPartition, list[KafkaCommitTask]] = {}
         self._count: int = 0
         self._watermarks: dict[tuple[int, TopicPartition], int] = {}
+        # Commits that hit a transient error; take_ready() returns them again, merged per consumer.
+        self._held: list[ReadyCommit] = []
 
     def __len__(self) -> int:
         return self._count
@@ -131,6 +132,10 @@ class PendingCommits:
     def absorb(self, ct: KafkaCommitTask) -> None:
         insert_sorted(self._pending.setdefault(ct.topic_partition, []), ct)
         self._count += 1
+
+    def hold(self, rc: ReadyCommit) -> None:
+        self._held.append(rc)
+        self._count += len(rc.tasks)
 
     def take_ready(self) -> list[ReadyCommit]:
         # Extract each partition's contiguous-done prefix (cancelled = hard
@@ -140,16 +145,28 @@ class PendingCommits:
         ready, ready_count = extract_ready_prefixes(self._pending)
         self._count -= ready_count
         flat: list[KafkaCommitTask] = [t for tasks in ready.values() for t in tasks]
-        if not flat:
-            return []
         by_consumer: dict[int, list[KafkaCommitTask]] = {}
         for task in flat:
             by_consumer.setdefault(id(task.consumer), []).append(task)
-        result: list[ReadyCommit] = []
+        fresh: list[ReadyCommit] = []
         for consumer_id, tasks in by_consumer.items():
             offsets = map_offsets_per_partition(consumer_id, tasks, self._watermarks)
-            result.append(ReadyCommit(consumer=tasks[0].consumer, offsets=offsets, tasks=tasks))
-        return result
+            fresh.append(ReadyCommit(consumer=tasks[0].consumer, offsets=offsets, tasks=tasks))
+        held, self._held = self._held, []
+        self._count -= sum(len(rc.tasks) for rc in held)
+        merged: dict[int, ReadyCommit] = {}
+        for rc in (*held, *fresh):
+            prior = merged.get(id(rc.consumer))
+            if prior is None:
+                merged[id(rc.consumer)] = rc
+                continue
+            offsets = dict(prior.offsets)
+            for partition, offset in rc.offsets.items():
+                offsets[partition] = max(offset, offsets.get(partition, offset))
+            merged[id(rc.consumer)] = ReadyCommit(
+                consumer=rc.consumer, offsets=offsets, tasks=[*prior.tasks, *rc.tasks]
+            )
+        return list(merged.values())
 
     def clear_watermarks(self, partitions: typing.Iterable[TopicPartition] | None = None) -> None:
         # Drops every consumer's floor for the given partitions, not just one owner's. This

@@ -1,5 +1,7 @@
 import dataclasses
 
+from faststream_concurrent_aiokafka import consts
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Decision:
@@ -11,7 +13,8 @@ class Decision:
 class CommitScheduler:
     """Owns the streaming loop's when-to-commit decision state.
 
-    Manages the timeout deadline, the flush lifecycle, and the shutdown lifecycle.
+    Manages the timeout deadline, the flush lifecycle, the shutdown lifecycle,
+    and the backoff between commit rounds that hit a transient error.
 
     Synchronous, I/O-free, single-owner: the committer's async driver is the
     sole caller, on one asyncio task. Reads no clock and touches no asyncio
@@ -23,7 +26,9 @@ class CommitScheduler:
     Invariants:
       * pending empty ⇒ timeout_deadline is None.
       * flush_in_progress is set only when a flush fired without a stop request,
-        and cleared once pending drains.
+        and cleared once pending drains or the flush is released.
+      * retry_not_before is set only by a round that hit a transient error, and
+        cleared by the next round that did not; until it passes, no trigger commits.
       * should_shutdown is set only when a flush fired with a stop request; once
         set, is_finished() returns True as soon as pending drains.
     """
@@ -34,17 +39,31 @@ class CommitScheduler:
         self._timeout_deadline: float | None = None
         self._should_shutdown: bool = False
         self._flush_in_progress: bool = False
+        self._retry_attempts: int = 0
+        self._retry_not_before: float | None = None
+
+    @property
+    def retrying(self) -> bool:
+        return self._retry_attempts > 0
 
     def accepts_new_work(self) -> bool:
         # While shutting down, the driver stops pulling new items from the queue.
         return not self._should_shutdown
 
     def wait_timeout(self, now: float) -> float | None:
-        # Remaining time until the batch-timeout fires, for asyncio.wait. None when
-        # no deadline is armed (pending empty), so the select blocks until an event.
-        if self._timeout_deadline is None:
+        # Time until the batch-timeout fires or, during a flush, a backed-off retry is due.
+        # None when neither is armed, so the select blocks until an event.
+        wake_at = [] if self._timeout_deadline is None else [self._timeout_deadline]
+        urgent = self._flush_in_progress or self._should_shutdown
+        if urgent and self._retry_not_before is not None and self._retry_not_before > now:
+            wake_at.append(self._retry_not_before)
+        if not wake_at:
             return None
-        return max(self._timeout_deadline - now, 0.0)
+        return max(min(wake_at) - now, 0.0)
+
+    def release_flush(self) -> None:
+        # Fed before evaluate(), so a flush that fired since the release still opens.
+        self._flush_in_progress = False
 
     def evaluate(
         self,
@@ -69,7 +88,8 @@ class CommitScheduler:
             else:
                 self._flush_in_progress = True
 
-        should_commit = (
+        backing_off = self._retry_not_before is not None and now < self._retry_not_before
+        should_commit = not backing_off and (
             pending_len >= self._batch_size or timeout_fired or self._flush_in_progress or self._should_shutdown
         )
         return Decision(
@@ -85,6 +105,7 @@ class CommitScheduler:
         committed: bool,
         timeout_fired: bool,
         pending_empty: bool,
+        transient_error: bool,
     ) -> None:
         # An active commit_all (flush without stop) keeps committing until pending
         # drains; clear the flag once it does so messages_queue.join() can return.
@@ -94,6 +115,13 @@ class CommitScheduler:
         # let it keep ticking. Invariant: pending empty ⇒ deadline None.
         if committed or timeout_fired:
             self._timeout_deadline = (now + self._batch_timeout) if not pending_empty else None
+        if transient_error:
+            self._retry_attempts += 1
+            delay = consts.COMMIT_RETRY_BACKOFF_BASE_SEC * 2 ** (self._retry_attempts - 1)
+            self._retry_not_before = now + min(delay, consts.COMMIT_RETRY_BACKOFF_MAX_SEC)
+        elif committed:
+            self._retry_attempts = 0
+            self._retry_not_before = None
 
     def is_finished(self, *, pending_empty: bool) -> bool:
         return self._should_shutdown and pending_empty

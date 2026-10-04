@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `faststream-concurrent-aiokafka` gives FastStream's Kafka broker bounded concurrent message
 processing without giving up at-least-once delivery. [`CONTEXT.md`](CONTEXT.md) opens with what it
 does and owns the vocabulary — read it before naming a concept in code, a test name, or an issue
-title. Most of the vocabulary is FastStream's and aiokafka's; only six terms are this package's.
+title. Most of the vocabulary is FastStream's and aiokafka's; only seven terms are this package's.
 
 ## Commands
 
