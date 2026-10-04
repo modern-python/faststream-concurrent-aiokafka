@@ -113,7 +113,7 @@ This library does not install signal handlers. Shutdown is driven by your lifesp
 
 ### KafkaBatchCommitter
 
-Runs as a background asyncio task. A streaming loop absorbs `KafkaCommitTask` objects into per-partition pending state and commits each partition's contiguous-done prefix when total pending crosses `commit_batch_size`, when `commit_batch_timeout_sec` fires, or when `commit_all`/`close` sets the flush event. Cancelled tasks are a hard boundary: the offset advance stops at the cancelled task so it gets redelivered on restart (at-least-once). If the committer's task dies, `CommitterIsDeadError` is raised to callers.
+Runs as a background asyncio task. A streaming loop absorbs `KafkaCommitTask` objects into pending state per consumer and partition and commits each one's contiguous-done prefix when total pending crosses `commit_batch_size`, when `commit_batch_timeout_sec` fires, or when `commit_all`/`close` sets the flush event. Cancelled tasks are a hard boundary: the offset advance stops at the cancelled task so it gets redelivered on restart (at-least-once). If the committer's task dies, `CommitterIsDeadError` is raised to callers.
 
 ## API reference
 

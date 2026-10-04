@@ -168,3 +168,48 @@ def test_held_commits_stay_per_consumer() -> None:
 
     assert ready[id(a)].offsets == {_tp(): 1}
     assert ready[id(b)].offsets == {_tp(): 4}
+
+
+@pytest.mark.parametrize("blocked_first", [True, False])
+def test_another_consumers_unfinished_task_does_not_hold_back_a_ready_prefix(*, blocked_first: bool) -> None:
+    blocked, ready_consumer = MockAIOKafkaConsumer(), MockAIOKafkaConsumer()
+    if not blocked_first:
+        blocked, ready_consumer = ready_consumer, blocked
+    pending = PendingCommits()
+    pending.absorb(make_commit_task(blocked, _tp(), offset=5, done=False))
+    pending.absorb(make_commit_task(ready_consumer, _tp(), offset=6, done=True))
+
+    [rc] = pending.take_ready()
+
+    assert rc.consumer is ready_consumer
+    assert rc.offsets == {_tp(): 7}
+    assert len(pending) == 1
+
+
+def test_unfinished_task_still_holds_back_its_own_consumers_later_tasks(mock_consumer: MockAIOKafkaConsumer) -> None:
+    other = MockAIOKafkaConsumer()
+    pending = PendingCommits()
+    pending.absorb(make_commit_task(mock_consumer, _tp(), offset=5, done=False))
+    pending.absorb(make_commit_task(other, _tp(), offset=6, done=True))
+    pending.absorb(make_commit_task(mock_consumer, _tp(), offset=7, done=True))
+
+    ready = {id(rc.consumer): rc for rc in pending.take_ready()}
+
+    assert set(ready) == {id(other)}
+    assert len(pending) == 2
+
+
+def test_cancelled_task_sets_a_watermark_only_for_its_own_consumer() -> None:
+    a, b = MockAIOKafkaConsumer(), MockAIOKafkaConsumer()
+    pending = PendingCommits()
+    pending.absorb(make_commit_task(a, _tp(), offset=5, cancelled=True))
+    pending.absorb(make_commit_task(b, _tp(), offset=6, done=True))
+    first = {id(rc.consumer): rc for rc in pending.take_ready()}
+
+    pending.absorb(make_commit_task(a, _tp(), offset=8, done=True))
+    pending.absorb(make_commit_task(b, _tp(), offset=9, done=True))
+    second = {id(rc.consumer): rc for rc in pending.take_ready()}
+
+    assert first[id(b)].offsets == {_tp(): 7}
+    assert second[id(a)].offsets == {}
+    assert second[id(b)].offsets == {_tp(): 10}
