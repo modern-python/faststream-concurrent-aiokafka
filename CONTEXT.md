@@ -15,7 +15,7 @@ Most of the vocabulary is **not this package's**. `broker`, `subscriber`, `middl
 `ack policy` and `ContextRepo` are [FastStream](https://faststream.ag2.ai/)'s; `consumer`,
 `consumer group`, `partition`, `offset`, `commit` and `rebalance` are Kafka's, reached through
 [aiokafka](https://aiokafka.readthedocs.io/). Those projects are the authority for all of them and
-nothing here redefines one. The six below are local to this package's concurrency model, and each
+nothing here redefines one. The seven below are local to this package's concurrency model, and each
 exists because getting the word wrong here has a concrete cost.
 
 **Handler**:
@@ -50,6 +50,13 @@ The per-`(consumer, partition)` floor recorded when a cancelled task is seen, pa
 must not advance until a rebalance clears it. Distinct from the cancelled task itself being a
 **hard boundary** within one commit round: the boundary stops that round, the watermark is what
 makes the stop survive later rounds.
+
+**Flush**:
+A period in which the committer commits every ready offset as soon as it can, instead of waiting
+for a full batch or the batch timeout. Three things open one: a rebalance revoking partitions
+(`commit_all`), backpressure at the uncommitted-task ceiling, and shutdown (`close`). A bare
+"flush" can mean any of the three; name the trigger when the difference matters. A rebalance flush
+ends when pending work drains or when every `commit_all` waiting on it gives up.
 
 **Control signal**:
 A member of FastStream's `IgnoredException` family — `AckMessage`, `RejectMessage`, `SkipMessage`,

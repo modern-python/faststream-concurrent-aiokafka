@@ -117,3 +117,54 @@ def test_clear_watermarks_clears_every_consumer_on_partition() -> None:
     ready = {id(rc.consumer): rc for rc in pending.take_ready()}
     assert ready[id(a)].offsets == {_tp(): 2}
     assert ready[id(b)].offsets == {_tp(): 2}
+
+
+def test_held_commit_counts_as_pending(mock_consumer: MockAIOKafkaConsumer) -> None:
+    pending = PendingCommits()
+    pending.absorb(make_commit_task(mock_consumer, _tp(), offset=0, done=True))
+    pending.absorb(make_commit_task(mock_consumer, _tp(), offset=1, done=True))
+    [rc] = pending.take_ready()
+
+    pending.hold(rc)
+
+    assert len(pending) == 2
+
+
+def test_take_ready_returns_a_held_commit(mock_consumer: MockAIOKafkaConsumer) -> None:
+    pending = PendingCommits()
+    pending.absorb(make_commit_task(mock_consumer, _tp(), offset=0, done=True))
+    [rc] = pending.take_ready()
+    pending.hold(rc)
+
+    assert pending.take_ready() == [rc]
+    assert len(pending) == 0
+
+
+def test_take_ready_merges_a_held_commit_with_new_ready_work(mock_consumer: MockAIOKafkaConsumer) -> None:
+    pending = PendingCommits()
+    pending.absorb(make_commit_task(mock_consumer, _tp(0), offset=0, done=True))
+    [held] = pending.take_ready()
+    pending.hold(held)
+    pending.absorb(make_commit_task(mock_consumer, _tp(0), offset=1, done=True))
+    pending.absorb(make_commit_task(mock_consumer, _tp(1), offset=5, done=True))
+
+    [rc] = pending.take_ready()
+
+    assert rc.consumer is mock_consumer
+    assert rc.offsets == {_tp(0): 2, _tp(1): 6}
+    assert [t.offset for t in rc.tasks] == [0, 1, 5]
+    assert len(pending) == 0
+
+
+def test_held_commits_stay_per_consumer() -> None:
+    a, b = MockAIOKafkaConsumer(), MockAIOKafkaConsumer()
+    pending = PendingCommits()
+    pending.absorb(make_commit_task(a, _tp(), offset=0, done=True))
+    [held] = pending.take_ready()
+    pending.hold(held)
+    pending.absorb(make_commit_task(b, _tp(), offset=3, done=True))
+
+    ready = {id(rc.consumer): rc for rc in pending.take_ready()}
+
+    assert ready[id(a)].offsets == {_tp(): 1}
+    assert ready[id(b)].offsets == {_tp(): 4}

@@ -217,10 +217,10 @@ async def test_committer_commits_to_kafka(committer: KafkaBatchCommitter, mock_c
     assert call_args == partitions_to_offsets
 
 
-async def test_committer_retries_on_kafka_error(
+async def test_call_committer_returns_a_transient_error(
     committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
 ) -> None:
-    """KafkaError re-queues the batch for retry on the next cycle."""
+    """KafkaError is handed back to _commit_ready, which holds the batch; nothing is re-queued."""
     mock_task: typing.Final = MockAsyncioTask(result="success")
     sample_task: typing.Final = KafkaCommitTask(
         asyncio_task=mock_task,  # ty: ignore[invalid-argument-type]
@@ -228,22 +228,21 @@ async def test_committer_retries_on_kafka_error(
         consumer=mock_consumer,
         topic_partition=TopicPartition(topic="test-topic", partition=0),
     )
-    mock_consumer.commit.side_effect = KafkaError("transient broker error")
+    error: typing.Final = KafkaError("transient broker error")
+    mock_consumer.commit.side_effect = error
 
     partitions_to_offsets: typing.Final = {sample_task.topic_partition: 101}
     rc = _pending_state.ReadyCommit(consumer=mock_consumer, offsets=partitions_to_offsets, tasks=[sample_task])
     result: typing.Final = await committer._call_committer(rc)
 
-    assert result is False
-    assert not committer._messages_queue.empty()
-    requeued_task: typing.Final = await committer._messages_queue.get()
-    assert requeued_task == sample_task
+    assert result is error
+    assert committer._messages_queue.empty()
 
 
 async def test_committer_ignores_commit_failed_error(
     committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer, sample_task: KafkaCommitTask
 ) -> None:
-    """CommitFailedError (rebalance in progress) is silently ignored — no re-queue."""
+    """CommitFailedError (rebalance in progress) is discarded, not held for retry."""
     mock_consumer.commit.side_effect = CommitFailedError()
     partitions_to_offsets: typing.Final = {sample_task.topic_partition: 101}
     rc = _pending_state.ReadyCommit(consumer=mock_consumer, offsets=partitions_to_offsets, tasks=[sample_task])
@@ -642,7 +641,7 @@ def test_insert_sorted_appends_in_order(mock_consumer: MockAIOKafkaConsumer) -> 
 
 
 def test_insert_sorted_bisects_out_of_order(mock_consumer: MockAIOKafkaConsumer) -> None:
-    """A re-queued task with a lower offset slides into the right position."""
+    """An out-of-order task with a lower offset slides into the right position."""
     tp: typing.Final = TopicPartition(topic="t", partition=0)
     pending: list[KafkaCommitTask] = []
     for offset in (10, 11):
@@ -695,9 +694,8 @@ async def test_commit_ready_calls_commit_per_partition_max(
         offsets=_pending_state.map_offsets_per_partition(id(mock_consumer), tasks, {}),
         tasks=tasks,
     )
-    result: typing.Final = await committer._commit_ready([rc])
+    await committer._commit_ready([rc])
 
-    assert result is True
     mock_consumer.commit.assert_called_once_with({tp: expected_offset + 2})
 
 
@@ -781,10 +779,10 @@ async def test_commit_ready_handles_multiple_consumers(committer: KafkaBatchComm
     consumer_b.commit.assert_called_once_with({tp_b: 21})
 
 
-async def test_commit_ready_returns_false_on_commit_failure(
+async def test_commit_ready_discarded_commit_is_not_a_transient_error(
     committer: KafkaBatchCommitter, mock_consumer: MockAIOKafkaConsumer
 ) -> None:
-    """_commit_ready returns False when _call_committer fails."""
+    """A commit _call_committer discards is finished, not held for retry."""
     task: typing.Final = MockAsyncioTask(result="ok")
     tp: typing.Final = TopicPartition(topic="t", partition=0)
     commit_task: typing.Final = KafkaCommitTask(
@@ -801,12 +799,13 @@ async def test_commit_ready_returns_false_on_commit_failure(
         result: typing.Final = await committer._commit_ready([rc])
 
     assert result is False
+    assert len(committer._pending) == 0
 
 
-async def test_commit_ready_returns_false_if_any_consumer_group_fails(
+async def test_commit_ready_holds_only_the_consumer_that_hit_a_transient_error(
     committer: KafkaBatchCommitter,
 ) -> None:
-    """If any consumer's commit slice fails, the overall return is False."""
+    """One consumer's transient error holds its commit; the other consumer still commits."""
     consumer_a: typing.Final = MockAIOKafkaConsumer()
     consumer_b: typing.Final = MockAIOKafkaConsumer()
     consumer_a.commit.side_effect = KafkaError("transient")  # consumer_a fails
@@ -842,8 +841,9 @@ async def test_commit_ready_returns_false_if_any_consumer_group_fails(
     )
     result: typing.Final = await committer._commit_ready([rc_a, rc_b])
 
-    assert result is False
-    consumer_b.commit.assert_called_once()  # b still committed independently
+    assert result is True
+    consumer_b.commit.assert_called_once()
+    assert committer._pending.take_ready() == [rc_a]
 
 
 async def test_commit_ready_cancelled_task_not_logged_as_error(
@@ -1223,14 +1223,13 @@ async def test_commit_all_times_out_on_hung_handler(caplog: pytest.LogCaptureFix
     await committer.close()
 
 
-async def test_committer_streaming_handles_requeue_offset_order() -> None:
-    """Lazy offset sort tolerates re-queued tasks landing after higher-offset arrivals.
+async def test_committer_streaming_merges_held_batch_with_later_offsets() -> None:
+    """A batch held after a transient KafkaError merges with higher-offset arrivals.
 
-    Transient KafkaError re-queues a batch; meanwhile new same-partition tasks arrive
-    with higher offsets. The final commit must reflect the correct max offset.
+    The final commit must reflect the max offset across the held batch and the new tasks.
     """
     consumer: typing.Final = MockAIOKafkaConsumer()
-    # First commit attempt: transient KafkaError → re-queue. Second attempt: succeeds.
+    # First commit attempt: transient KafkaError → held. Second attempt: succeeds.
     consumer.commit.side_effect = [KafkaError("transient"), None, None]
 
     committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=2)
@@ -1253,15 +1252,15 @@ async def test_committer_streaming_handles_requeue_offset_order() -> None:
             )
         )
 
-    # Wait until the failing commit attempt has occurred and the batch was re-queued.
+    # Wait until the failing commit attempt has occurred and the batch is held.
     await _drive_until(lambda: consumer.commit.call_count >= 1, deadline_sec=1.0)
 
-    # Now send a task with a higher offset BEFORE the re-queued tasks land back in pending.
+    # Now send a task with a higher offset while the batch is held.
     late_task: typing.Final = asyncio.create_task(quick())
     await committer.send_task(
         KafkaCommitTask(
             asyncio_task=late_task,
-            offset=200,  # much higher than the re-queued 100/101
+            offset=200,  # much higher than the held 100/101
             consumer=consumer,
             topic_partition=tp,
         )
@@ -1270,7 +1269,7 @@ async def test_committer_streaming_handles_requeue_offset_order() -> None:
     await committer.close()
 
     # The final commit must reflect the max processed offset (200 → next-to-fetch 201)
-    # despite the requeued 100/101 arriving after offset 200 in queue order.
+    # merged with the held 100/101.
     final_call: typing.Final = consumer.commit.call_args_list[-1]
     assert final_call.args[0] == {tp: 201}
 
@@ -1552,3 +1551,145 @@ async def test_committer_cancellation_is_not_reported_as_a_death(caplog: pytest.
     await asyncio.sleep(0)
 
     assert not _death_records(caplog)
+
+
+# ---------- transient commit errors ----------
+
+
+async def _never_finishes() -> None:
+    await asyncio.Event().wait()
+
+
+async def _finishes() -> None:
+    return None
+
+
+def _commit_task(consumer: MockAIOKafkaConsumer, partition: int, task: asyncio.Task[None]) -> KafkaCommitTask:
+    return KafkaCommitTask(
+        asyncio_task=task, offset=100, consumer=consumer, topic_partition=TopicPartition(topic="t", partition=partition)
+    )
+
+
+async def _cancel_all(committer: KafkaBatchCommitter, *tasks: asyncio.Task[typing.Any]) -> None:
+    assert committer._commit_task is not None
+    for task in (committer._commit_task, *tasks):
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_commit_all_retries_a_transient_error_within_the_flush_timeout(caplog: pytest.LogCaptureFixture) -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = [KafkaError("blip"), None]
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=0.5, commit_batch_size=100)
+    committer.spawn()
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+
+    await committer.commit_all(flush_timeout_sec=0.5)
+
+    assert "commit_all flush timed out" not in caplog.text
+    assert consumer.commit.call_args_list[-1].args[0] == {TopicPartition(topic="t", partition=0): 101}
+    await committer.close()
+
+
+async def test_commit_retries_back_off_during_a_flush() -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = KafkaError("outage")
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    committer.spawn()
+    in_flight: typing.Final = asyncio.create_task(_never_finishes())
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+    await committer.send_task(_commit_task(consumer, 1, in_flight))
+    await _drive_until(lambda: len(committer._pending) == 2)
+
+    await committer.commit_all(flush_timeout_sec=0.5)
+
+    assert consumer.commit.call_count <= 4  # attempts at about 0, 0.1 and 0.3s
+    await _cancel_all(committer, in_flight)
+
+
+async def test_flush_urgency_ends_when_commit_all_times_out() -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = KafkaError("outage")
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    committer.spawn()
+    in_flight: typing.Final = asyncio.create_task(_never_finishes())
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+    await committer.send_task(_commit_task(consumer, 1, in_flight))
+    await _drive_until(lambda: len(committer._pending) == 2)
+
+    await committer.commit_all(flush_timeout_sec=0.25)
+    calls_when_flush_ended: typing.Final = consumer.commit.call_count
+    await asyncio.sleep(0.5)
+
+    assert consumer.commit.call_count == calls_when_flush_ended
+    await _cancel_all(committer, in_flight)
+
+
+async def test_one_commit_all_timing_out_keeps_the_flush_for_another_waiter() -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = [KafkaError("blip"), None]
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    committer.spawn()
+    in_flight: typing.Final = asyncio.create_task(_never_finishes())
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+    await committer.send_task(_commit_task(consumer, 1, in_flight))
+    await _drive_until(lambda: len(committer._pending) == 2)
+
+    long_wait: typing.Final = asyncio.create_task(committer.commit_all(flush_timeout_sec=1.0))
+    await committer.commit_all(flush_timeout_sec=0.05)
+    await _drive_until(lambda: consumer.commit.call_count >= 2, deadline_sec=0.5)
+
+    assert consumer.commit.call_args_list[1].args[0] == {TopicPartition(topic="t", partition=0): 101}
+    await _cancel_all(committer, in_flight, long_wait)
+
+
+async def test_close_retries_a_transient_error_before_exiting() -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = [KafkaError("blip"), None]
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    committer.spawn()
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+
+    await committer.close()
+
+    assert consumer.commit.call_count == 2
+    assert consumer.commit.call_args_list[-1].args[0] == {TopicPartition(topic="t", partition=0): 101}
+
+
+async def test_transient_error_outside_a_flush_retries_after_the_batch_timeout() -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = [KafkaError("blip"), None]
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=0.2, commit_batch_size=100)
+    committer.spawn()
+    loop: typing.Final = asyncio.get_running_loop()
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+
+    await _drive_until(lambda: consumer.commit.call_count >= 1)
+    failed_at: typing.Final = loop.time()
+    await _drive_until(lambda: consumer.commit.call_count >= 2)
+
+    assert loop.time() - failed_at >= 0.15
+    await committer.close()
+
+
+async def test_a_streak_of_transient_errors_logs_one_error(caplog: pytest.LogCaptureFixture) -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = [KafkaError("a"), KafkaError("b"), KafkaError("c"), None]
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    committer.spawn()
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+
+    with caplog.at_level(logging.INFO, logger="faststream_concurrent_aiokafka.batch_committer"):
+        await committer.commit_all(flush_timeout_sec=2.0)
+
+    records: typing.Final = [r for r in caplog.records if r.name == "faststream_concurrent_aiokafka.batch_committer"]
+    errors: typing.Final = [r for r in records if r.levelno == logging.ERROR]
+    warnings: typing.Final = [r for r in records if r.levelno == logging.WARNING]
+    infos: typing.Final = [r for r in records if r.levelno == logging.INFO]
+    assert len(errors) == 1
+    assert errors[0].exc_info is not None
+    assert len(warnings) == 2
+    assert all(r.exc_info is None for r in warnings)
+    assert len(infos) == 1
+    await committer.close()

@@ -47,6 +47,9 @@ class KafkaBatchCommitter:
         # iteration. Fan-in cost is O(1) regardless of partition count or pending depth.
         self._task_completed_event = asyncio.Event()
         self._stop_requested: bool = False
+        # commit_all callers still awaiting the flush; when the last one gives up, the flush is released.
+        self._flush_waiters: int = 0
+        self._flush_released: bool = False
 
         self._shutdown_timeout = shutdown_timeout_sec
         # Owns per-partition pending commit tasks, count, and cancellation watermarks.
@@ -83,7 +86,7 @@ class KafkaBatchCommitter:
             msg: typing.Final = "Committer main task is not running"
             raise CommitterIsDeadError(msg)
 
-    async def _call_committer(self, rc: _pending_state.ReadyCommit) -> bool:
+    async def _call_committer(self, rc: _pending_state.ReadyCommit) -> bool | KafkaError:
         if not rc.offsets:
             return True
         assigned: typing.Final = rc.consumer.assignment()
@@ -103,29 +106,41 @@ class KafkaBatchCommitter:
             # Partition no longer assigned (rebalance/revocation) — discard batch, not retryable
             logger.warning("Cannot commit due to partition loss or rebalancing, ignoring batch: %r", exc)
             return False
-        except KafkaError:
-            # Transient error — re-queue batch for retry on next cycle
-            logger.exception("Error during commit to kafka, re-queuing batch")
-            for task in rc.tasks:
-                self._uncommitted_count += 1
-                await self._messages_queue.put(task)
-            return False
+        except KafkaError as exc:
+            return exc
         else:
             return not revoked
 
     async def _commit_ready(self, ready_commits: list[_pending_state.ReadyCommit]) -> bool:
         # One commit per consumer, concurrently — each AIOKafkaConsumer commits its
-        # own partitions. task_done()/uncommitted_count balance the queue regardless
-        # of commit success (re-queued tasks are re-counted inside _call_committer).
+        # own partitions. A commit that hit a transient error stays pending, so its
+        # tasks are neither task_done() nor uncounted. Returns whether any did.
         results: typing.Final = await asyncio.gather(*(self._call_committer(rc) for rc in ready_commits))
-        committed_count = 0
-        for rc in ready_commits:
-            committed_count += len(rc.tasks)
+        transient_errors: typing.Final[list[KafkaError]] = []
+        finished_count = 0
+        for rc, result in zip(ready_commits, results, strict=True):
+            if isinstance(result, KafkaError):
+                transient_errors.append(result)
+                self._pending.hold(rc)
+                continue
+            finished_count += len(rc.tasks)
             for _ in rc.tasks:
                 self._messages_queue.task_done()
-        self._uncommitted_count -= committed_count
+        self._uncommitted_count -= finished_count
         self._uncommitted_drained.set()
-        return all(results)
+        self._log_transient_errors(transient_errors)
+        return bool(transient_errors)
+
+    def _log_transient_errors(self, errors: list[KafkaError]) -> None:
+        if not errors:
+            if self._scheduler.retrying:
+                logger.info("Commit to kafka succeeded after transient errors")
+            return
+        for index, exc in enumerate(errors):
+            if index == 0 and not self._scheduler.retrying:
+                logger.error("Error during commit to kafka, retrying the batch", exc_info=exc)
+            else:
+                logger.warning("Commit to kafka still failing, retrying the batch: %r", exc)
 
     async def _run_commit_process(self) -> None:
         tasks: typing.Final = _LoopTasks(
@@ -171,6 +186,10 @@ class KafkaBatchCommitter:
 
         flush_fired: typing.Final = tasks.flush_wait_task.done()
 
+        if self._flush_released:
+            self._flush_released = False
+            self._scheduler.release_flush()
+
         decision: typing.Final = self._scheduler.evaluate(
             now=now,
             absorbed=absorbed,
@@ -183,10 +202,11 @@ class KafkaBatchCommitter:
             self._handle_flush_fired(tasks, drain_queue=decision.drain_queue_now)
 
         committed = False
+        transient_error = False
         if decision.should_commit:
             ready = self._pending.take_ready()
             if ready:
-                await self._commit_ready(ready)
+                transient_error = await self._commit_ready(ready)
                 committed = True
 
         self._scheduler.note_committed(
@@ -194,6 +214,7 @@ class KafkaBatchCommitter:
             committed=committed,
             timeout_fired=decision.timeout_fired,
             pending_empty=not self._pending,
+            transient_error=transient_error,
         )
 
     def _handle_flush_fired(self, tasks: "_LoopTasks", *, drain_queue: bool) -> None:
@@ -224,15 +245,23 @@ class KafkaBatchCommitter:
         reassignment — at-least-once). Safe to call during rebalance
         (on_partitions_revoked); the committer keeps running after this returns.
         """
+        self._flush_waiters += 1
+        self._flush_released = False
         self._flush_batch_event.set()
+        drained = False
         try:
             await asyncio.wait_for(self._messages_queue.join(), timeout=flush_timeout_sec)
+            drained = True
         except TimeoutError:
             logger.warning(
                 "Kafka middleware. commit_all flush timed out after %.1fs; "
                 "in-flight offsets will be redelivered on restart/reassignment",
                 flush_timeout_sec,
             )
+        finally:
+            self._flush_waiters -= 1
+            if not drained and self._flush_waiters == 0:
+                self._flush_released = True
 
     def clear_cancellation_watermarks(self, partitions: typing.Iterable[TopicPartition] | None = None) -> None:
         """Forget cancellation watermarks for ``partitions`` (or all if ``None``).

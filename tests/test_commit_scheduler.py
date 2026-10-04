@@ -2,6 +2,8 @@ import ast
 import inspect
 import pathlib
 
+import pytest
+
 from faststream_concurrent_aiokafka._commit_scheduler import CommitScheduler
 
 
@@ -58,7 +60,7 @@ def test_flush_without_stop_commits_until_pending_drains() -> None:
     assert d.drain_queue_now is False
     d2 = s.evaluate(now=101.0, absorbed=False, flush_fired=False, stop_requested=False, pending_len=1)
     assert d2.should_commit is True  # keeps committing while flush_in_progress
-    s.note_committed(now=102.0, committed=True, timeout_fired=False, pending_empty=True)
+    s.note_committed(now=102.0, committed=True, timeout_fired=False, pending_empty=True, transient_error=False)
     d3 = s.evaluate(now=103.0, absorbed=False, flush_fired=False, stop_requested=False, pending_len=0)
     assert d3.should_commit is False  # flag cleared once pending drained
 
@@ -76,28 +78,28 @@ def test_flush_with_stop_sets_shutdown_and_drain() -> None:
 def test_deadline_reset_keeps_ticking_when_pending_remains() -> None:
     s = _sched(timeout=10.0)
     s.evaluate(now=100.0, absorbed=True, flush_fired=False, stop_requested=False, pending_len=5)
-    s.note_committed(now=104.0, committed=True, timeout_fired=False, pending_empty=False)
+    s.note_committed(now=104.0, committed=True, timeout_fired=False, pending_empty=False, transient_error=False)
     assert s.wait_timeout(now=104.0) == 10.0  # re-armed at fresh now + timeout
 
 
 def test_deadline_cleared_when_pending_drains() -> None:
     s = _sched(timeout=10.0)
     s.evaluate(now=100.0, absorbed=True, flush_fired=False, stop_requested=False, pending_len=1)
-    s.note_committed(now=104.0, committed=True, timeout_fired=False, pending_empty=True)
+    s.note_committed(now=104.0, committed=True, timeout_fired=False, pending_empty=True, transient_error=False)
     assert s.wait_timeout(now=104.0) is None  # invariant: pending empty ⇒ no deadline
 
 
 def test_note_committed_resets_on_timeout_even_without_commit() -> None:
     s = _sched(timeout=10.0)
     s.evaluate(now=100.0, absorbed=True, flush_fired=False, stop_requested=False, pending_len=1)
-    s.note_committed(now=110.0, committed=False, timeout_fired=True, pending_empty=False)
+    s.note_committed(now=110.0, committed=False, timeout_fired=True, pending_empty=False, transient_error=False)
     assert s.wait_timeout(now=110.0) == 10.0
 
 
 def test_note_committed_no_reset_when_neither_committed_nor_timeout() -> None:
     s = _sched(timeout=10.0)
     s.evaluate(now=100.0, absorbed=True, flush_fired=False, stop_requested=False, pending_len=1)
-    s.note_committed(now=103.0, committed=False, timeout_fired=False, pending_empty=False)
+    s.note_committed(now=103.0, committed=False, timeout_fired=False, pending_empty=False, transient_error=False)
     assert s.wait_timeout(now=103.0) == 7.0  # deadline left ticking, not reset
 
 
@@ -106,6 +108,80 @@ def test_no_trigger_when_idle_below_batch() -> None:
     s.evaluate(now=100.0, absorbed=True, flush_fired=False, stop_requested=False, pending_len=1)
     d = s.evaluate(now=102.0, absorbed=False, flush_fired=False, stop_requested=False, pending_len=2)
     assert d.should_commit is False
+
+
+def _flush(s: CommitScheduler, *, now: float, released: bool = False, fired: bool = False) -> bool:
+    if released:
+        s.release_flush()
+    return s.evaluate(now=now, absorbed=False, flush_fired=fired, stop_requested=False, pending_len=1).should_commit
+
+
+def _fail(s: CommitScheduler, *, now: float) -> None:
+    s.note_committed(now=now, committed=True, timeout_fired=False, pending_empty=False, transient_error=True)
+
+
+def test_transient_error_backs_off_the_next_flush_commit() -> None:
+    s = _sched()
+    assert _flush(s, now=100.0, fired=True) is True
+    _fail(s, now=100.0)
+    assert _flush(s, now=100.05) is False
+    assert s.wait_timeout(now=100.05) == pytest.approx(0.05)
+    assert _flush(s, now=100.1) is True
+
+
+def test_backoff_doubles_up_to_the_cap() -> None:
+    s = _sched()
+    _flush(s, now=0.0, fired=True)
+    delays = []
+    now = 0.0
+    for _ in range(7):
+        _fail(s, now=now)
+        delay = s.wait_timeout(now=now)
+        assert delay is not None
+        delays.append(delay)
+        now += delay
+    assert delays == pytest.approx([0.1, 0.2, 0.4, 0.8, 1.6, 2.0, 2.0])
+
+
+def test_a_round_without_transient_error_resets_the_backoff() -> None:
+    s = _sched()
+    _flush(s, now=100.0, fired=True)
+    _fail(s, now=100.0)
+    _fail(s, now=100.1)
+    s.note_committed(now=100.3, committed=True, timeout_fired=False, pending_empty=False, transient_error=False)
+    assert _flush(s, now=100.3) is True
+    _fail(s, now=100.3)
+    assert s.wait_timeout(now=100.3) == pytest.approx(0.1)
+
+
+def test_backoff_gates_the_shutdown_flush() -> None:
+    s = _sched()
+    d = s.evaluate(now=100.0, absorbed=False, flush_fired=True, stop_requested=True, pending_len=1)
+    assert d.should_commit is True
+    _fail(s, now=100.0)
+    d = s.evaluate(now=100.05, absorbed=False, flush_fired=False, stop_requested=True, pending_len=1)
+    assert d.should_commit is False
+    assert s.wait_timeout(now=100.05) == pytest.approx(0.05)
+
+
+def test_retry_time_does_not_shorten_the_wait_outside_a_flush() -> None:
+    s = _sched(timeout=10.0)
+    s.evaluate(now=100.0, absorbed=True, flush_fired=False, stop_requested=False, pending_len=1)
+    _fail(s, now=110.0)
+    assert s.wait_timeout(now=110.0) == 10.0
+
+
+def test_released_flush_stops_committing() -> None:
+    s = _sched()
+    _flush(s, now=100.0, fired=True)
+    assert _flush(s, now=101.0, released=True) is False
+    assert _flush(s, now=102.0) is False
+
+
+def test_flush_fired_with_release_reopens_the_flush() -> None:
+    s = _sched()
+    _flush(s, now=100.0, fired=True)
+    assert _flush(s, now=101.0, released=True, fired=True) is True
 
 
 def test_the_commit_scheduler_reads_no_clock_and_touches_no_asyncio() -> None:
