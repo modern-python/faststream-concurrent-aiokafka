@@ -1,4 +1,5 @@
 import asyncio
+import collections.abc
 import contextlib
 import typing
 import uuid
@@ -439,7 +440,7 @@ async def test_asgi_faststream_basic_processing(kafka_bootstrap_servers: str) ->
         processed.append(msg)
 
     @contextlib.asynccontextmanager
-    async def lifespan(_context: ContextRepo) -> typing.AsyncIterator[None]:
+    async def lifespan(_context: ContextRepo) -> collections.abc.AsyncGenerator[None]:
         # AsgiFastStream injects its own app-level context, which is separate from
         # broker.context. Use broker.context explicitly so the middleware can find
         # the handler via self.context.
