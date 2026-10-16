@@ -1512,7 +1512,7 @@ async def test_committer_reports_the_cause_when_the_main_task_dies(caplog: pytes
     records: typing.Final = _death_records(caplog)
     assert len(records) == 1
     exc_info: typing.Final = records[0].exc_info
-    assert exc_info is not None
+    assert exc_info
     assert isinstance(exc_info[1], TypeError)
 
 
