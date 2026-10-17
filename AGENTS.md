@@ -12,7 +12,7 @@ title. Most of the vocabulary is FastStream's and aiokafka's; only seven terms a
 ## Commands
 
 `just` (task runner) and `uv` (package manager). The [`justfile`](justfile) is the source of truth:
-run `just --list`, or read it. The one thing it does not say: `just test` needs Docker; it starts Redpanda,
+`just --list`, or read it. The one thing it does not say: `just test` needs Docker; it starts Redpanda,
 runs pytest, and tears down. To run one test against an already-running stack,
 `uv run --no-sync pytest tests/test_kafka_committer.py -k <name>`.
 
