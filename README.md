@@ -261,9 +261,10 @@ Do not do it.
 - Python >= 3.11
 - `faststream[kafka]`
 
-## 📦 [PyPI](https://pypi.org/project/faststream-concurrent-aiokafka)
+## Links
 
-## 📝 [License](https://github.com/modern-python/faststream-concurrent-aiokafka/blob/main/LICENSE)
+- [PyPI](https://pypi.org/project/faststream-concurrent-aiokafka)
+- [License](https://github.com/modern-python/faststream-concurrent-aiokafka/blob/main/LICENSE)
 
 ## Part of `modern-python`
 
