@@ -2,7 +2,7 @@
 
 Concurrent message processing for FastStream's Kafka broker: a middleware that turns each
 `AckPolicy.MANUAL` message into a bounded background asyncio task, and a batch committer that
-advances each partition's offset only once the task for that message has finished — so
+advances each partition's offset only once the task for that message has finished, so
 concurrency does not cost the at-least-once guarantee.
 
 ## Language
@@ -19,7 +19,7 @@ nothing here redefines one. The seven below are local to this package's concurre
 exists because getting the word wrong here has a concrete cost.
 
 **Handler**:
-The `KafkaConcurrentHandler` — the engine that owns the concurrency semaphore, the in-flight task
+The `KafkaConcurrentHandler`: the engine that owns the concurrency semaphore, the in-flight task
 set, and the committer. Exactly one exists per `initialize_concurrent_processing` call. FastStream
 uses the same word for the user's subscriber function, and keys that function under `"handler_"` in
 its context, so a bare "handler" in this repo can mean either. Both senses are established here and
@@ -29,7 +29,7 @@ neither is being renamed; write `KafkaConcurrentHandler` or "the concurrent hand
 **User task**:
 The `asyncio.Task` wrapping one message's user coroutine, from dispatch until its done-callback
 runs. It is the unit the semaphore bounds, `stop()` cancels, and the committer waits on.
-_Avoid_: in-flight handler — a handler in flight is a task, and "handler" is the ambiguous word
+_Avoid_: in-flight handler. A handler in flight is a task, and "handler" is the ambiguous word
 above.
 
 **Route**:
@@ -40,7 +40,7 @@ this middleware were absent, while a skipped message is dropped mid-shutdown wit
 uncommitted for redelivery. They sound alike and their offset consequences are opposite.
 
 **Ready prefix**:
-The leading contiguous run of finished tasks on one partition for one consumer — the only offsets
+The leading contiguous run of finished tasks on one partition for one consumer: the only offsets
 eligible to commit, and all `ready` ever means in `take_ready` / `ReadyCommit` / `extract_ready_prefixes`. It
 is not "the finished tasks": a single unfinished task at the head holds back every finished task
 behind it on that consumer, which is what keeps commits from jumping past in-flight work. Another
@@ -60,9 +60,9 @@ for a full batch or the batch timeout. Three things open one: a rebalance revoki
 ends when pending work drains or when every `commit_all` waiting on it gives up.
 
 **Control signal**:
-A member of FastStream's `IgnoredException` family — `AckMessage`, `RejectMessage`, `SkipMessage`,
-`NackMessage`, `StopConsume`, `StopApplication` — raised inside a dispatched user task. The family
+A member of FastStream's `IgnoredException` family (`AckMessage`, `RejectMessage`, `SkipMessage`,
+`NackMessage`, `StopConsume`, `StopApplication`) raised inside a dispatched user task. The family
 is FastStream's; the two verbs are this package's. Every signal is **absorbed** (it never ends the
 task); only some are **honoured** (the library does what the signal asks). The words are not
-interchangeable, and the gap between them is a documented limitation, not a bug — see
+interchangeable, and the gap between them is a documented limitation, not a bug; see
 [ADR-0002](docs/adr/0002-control-signals-not-honoured.md).

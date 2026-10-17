@@ -6,13 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `faststream-concurrent-aiokafka` gives FastStream's Kafka broker bounded concurrent message
 processing without giving up at-least-once delivery. [`CONTEXT.md`](CONTEXT.md) opens with what it
-does and owns the vocabulary — read it before naming a concept in code, a test name, or an issue
+does and owns the vocabulary. Read it before naming a concept in code, a test name, or an issue
 title. Most of the vocabulary is FastStream's and aiokafka's; only seven terms are this package's.
 
 ## Commands
 
-`just` (task runner) and `uv` (package manager). The [`justfile`](justfile) is the source of truth —
-`just --list`, or read it. The one thing it does not say: `just test` needs Docker; it starts Redpanda,
+`just` (task runner) and `uv` (package manager). The [`justfile`](justfile) is the source of truth:
+run `just --list`, or read it. The one thing it does not say: `just test` needs Docker; it starts Redpanda,
 runs pytest, and tears down. To run one test against an already-running stack,
 `uv run --no-sync pytest tests/test_kafka_committer.py -k <name>`.
 
