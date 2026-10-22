@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # aiokafka ships no free-threaded wheel and its C codecs re-enable the GIL: use the pure-Python codecs on the t build.
-      AIOKAFKA_NO_EXTENSIONS: ${{ matrix.python-version == '3.14t' && '1' || '' }}
+      AIOKAFKA_NO_EXTENSIONS: ${{ endsWith(matrix.python-version, 't') && '1' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -31,6 +31,8 @@ jobs:
           - "3.13"
           - "3.14"
           - "3.14t"
+          - "3.15"
+          - "3.15t"
     services:
       redpanda:
         image: redpandadata/redpanda:latest
@@ -52,7 +54,7 @@ jobs:
       - run: uv python pin ${{ matrix.python-version }}
       - run: just install
       - name: Confirm the interpreter is free-threaded
-        if: matrix.python-version == '3.14t'
+        if: endsWith(matrix.python-version, 't')
         run: uv run --no-sync python -c "import sys, faststream_concurrent_aiokafka; assert not sys._is_gil_enabled(), 'GIL is enabled on a t-build'"
       - run: just test-ci
         env:
