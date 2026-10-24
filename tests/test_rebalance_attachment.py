@@ -9,6 +9,7 @@ from aiokafka import ConsumerRebalanceListener as BaseConsumerRebalanceListener
 from aiokafka.structs import TopicPartition
 from faststream import FastStream
 from faststream.kafka import KafkaBroker, KafkaRouter
+from faststream.kafka import TopicPartition as FastStreamTopicPartition
 from faststream.kafka.subscriber.usecase import ConcurrentBetweenPartitionsSubscriber, LogicSubscriber
 from faststream.middlewares import AckPolicy
 
@@ -94,7 +95,7 @@ async def test_listener_is_not_attached_to_manually_assigned_partitions() -> Non
     """Partitions assigned with `partitions=` never rebalance, so there is nothing to flush."""
     broker: typing.Final = _broker_in_app()
     subscriber: typing.Final = _subscribe(
-        broker, partitions=[TopicPartition(topic="a", partition=0)], ack_policy=AckPolicy.MANUAL
+        broker, partitions=[FastStreamTopicPartition(topic="a", partition=0)], ack_policy=AckPolicy.MANUAL
     )
 
     await _initialize(broker)
