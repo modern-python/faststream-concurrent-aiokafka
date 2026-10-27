@@ -89,6 +89,11 @@ isort.no-lines-before = ["standard-library", "local-folder"]
     "S101",    # allow asserts
     "PLR2004", # allow magic values in test assertions
 ]
+"tests_dr/**" = [
+    "INP001",  # no __init__.py, so `--cov=.` in test-ci does not count this opt-in suite
+    "S101",    # allow asserts
+    "PLR2004", # allow magic values in test assertions
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

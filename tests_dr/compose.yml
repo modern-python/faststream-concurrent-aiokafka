@@ -1,0 +1,59 @@
+name: fca-dr
+services:
+  redpanda-0:
+    image: redpandadata/redpanda:latest
+    container_name: fca-dr-0
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp 1
+      - --memory 512M
+      - --reserve-memory 0M
+      - --node-id 0
+      - --check=false
+      - --seeds redpanda-0:33145,redpanda-1:33145,redpanda-2:33145
+      - --rpc-addr 0.0.0.0:33145
+      - --advertise-rpc-addr redpanda-0:33145
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda-0:9092,external://localhost:19092
+    ports:
+      - "19092:19092"
+  redpanda-1:
+    image: redpandadata/redpanda:latest
+    container_name: fca-dr-1
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp 1
+      - --memory 512M
+      - --reserve-memory 0M
+      - --node-id 1
+      - --check=false
+      - --seeds redpanda-0:33145,redpanda-1:33145,redpanda-2:33145
+      - --rpc-addr 0.0.0.0:33145
+      - --advertise-rpc-addr redpanda-1:33145
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:29092
+      - --advertise-kafka-addr internal://redpanda-1:9092,external://localhost:29092
+    ports:
+      - "29092:29092"
+  redpanda-2:
+    image: redpandadata/redpanda:latest
+    container_name: fca-dr-2
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp 1
+      - --memory 512M
+      - --reserve-memory 0M
+      - --node-id 2
+      - --check=false
+      - --seeds redpanda-0:33145,redpanda-1:33145,redpanda-2:33145
+      - --rpc-addr 0.0.0.0:33145
+      - --advertise-rpc-addr redpanda-2:33145
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:39092
+      - --advertise-kafka-addr internal://redpanda-2:9092,external://localhost:39092
+    ports:
+      - "39092:39092"
