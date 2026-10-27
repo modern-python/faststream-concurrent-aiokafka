@@ -7,7 +7,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from aiokafka.errors import CommitFailedError, IllegalStateError, KafkaError, KafkaTimeoutError
+from aiokafka.errors import (
+    CommitFailedError,
+    GroupAuthorizationFailedError,
+    IllegalStateError,
+    KafkaConnectionError,
+    KafkaError,
+    KafkaTimeoutError,
+    TopicAuthorizationFailedError,
+)
 from aiokafka.structs import TopicPartition
 
 from faststream_concurrent_aiokafka import _pending_state, consts
@@ -1695,6 +1703,111 @@ async def test_a_streak_of_transient_errors_logs_one_error(caplog: pytest.LogCap
     assert len(warnings) == 2
     assert all(r.exc_info is None for r in warnings)
     assert len(infos) == 1
+    await committer.close()
+
+
+def _committer_errors(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        r
+        for r in caplog.records
+        if r.name == "faststream_concurrent_aiokafka.batch_committer" and r.levelno == logging.ERROR
+    ]
+
+
+def _exc_type(record: logging.LogRecord) -> type[BaseException] | None:
+    assert isinstance(record.exc_info, tuple)
+    return record.exc_info[0]
+
+
+async def test_a_non_retriable_commit_error_is_logged_as_needing_a_fix(caplog: pytest.LogCaptureFixture) -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = [GroupAuthorizationFailedError("group"), None]
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    committer.spawn()
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+
+    with caplog.at_level(logging.ERROR, logger="faststream_concurrent_aiokafka.batch_committer"):
+        await committer.commit_all(flush_timeout_sec=1.0)
+
+    errors: typing.Final = _committer_errors(caplog)
+    assert len(errors) == 1
+    assert "non-retriable" in errors[0].getMessage()
+    assert _exc_type(errors[0]) is GroupAuthorizationFailedError
+    await committer.close()
+
+
+async def test_a_non_retriable_error_mid_streak_logs_its_own_error(caplog: pytest.LogCaptureFixture) -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = [
+        KafkaConnectionError("down"),
+        TopicAuthorizationFailedError({"t"}),
+        TopicAuthorizationFailedError({"t"}),
+        None,
+    ]
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    committer.spawn()
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+
+    with caplog.at_level(logging.WARNING, logger="faststream_concurrent_aiokafka.batch_committer"):
+        await committer.commit_all(flush_timeout_sec=2.0)
+
+    errors: typing.Final = _committer_errors(caplog)
+    assert [_exc_type(r) for r in errors] == [KafkaConnectionError, TopicAuthorizationFailedError]
+    assert "non-retriable" not in errors[0].getMessage()
+    assert "non-retriable" in errors[1].getMessage()
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+    await committer.close()
+
+
+async def test_a_commit_timeout_is_not_reported_as_non_retriable(caplog: pytest.LogCaptureFixture) -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = [KafkaTimeoutError("slow"), None]
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    committer.spawn()
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+
+    with caplog.at_level(logging.ERROR, logger="faststream_concurrent_aiokafka.batch_committer"):
+        await committer.commit_all(flush_timeout_sec=1.0)
+
+    errors: typing.Final = _committer_errors(caplog)
+    assert len(errors) == 1
+    assert "non-retriable" not in errors[0].getMessage()
+    await committer.close()
+
+
+async def test_a_non_retriable_error_is_reported_again_in_a_later_streak(caplog: pytest.LogCaptureFixture) -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = [
+        GroupAuthorizationFailedError("group"),
+        None,
+        GroupAuthorizationFailedError("group"),
+        None,
+    ]
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    committer.spawn()
+
+    with caplog.at_level(logging.ERROR, logger="faststream_concurrent_aiokafka.batch_committer"):
+        await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+        await committer.commit_all(flush_timeout_sec=1.0)
+        await committer.send_task(_commit_task(consumer, 1, asyncio.create_task(_finishes())))
+        await committer.commit_all(flush_timeout_sec=1.0)
+
+    assert len([r for r in _committer_errors(caplog) if "non-retriable" in r.getMessage()]) == 2
+    await committer.close()
+
+
+async def test_a_non_retriable_error_holds_the_batch_and_keeps_the_committer_alive() -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = [GroupAuthorizationFailedError("group"), GroupAuthorizationFailedError("group"), None]
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    committer.spawn()
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+
+    await committer.commit_all(flush_timeout_sec=1.0)
+
+    assert committer.is_healthy
+    assert consumer.commit.call_count == 3
+    assert consumer.commit.call_args_list[-1].args[0] == {TopicPartition(topic="t", partition=0): 101}
     await committer.close()
 
 

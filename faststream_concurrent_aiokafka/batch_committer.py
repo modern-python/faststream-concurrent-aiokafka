@@ -53,6 +53,7 @@ class KafkaBatchCommitter:
         self._flush_released: bool = False
 
         self._shutdown_timeout = shutdown_timeout_sec
+        self._non_retriable_error_reported: bool = False
         self._commit_timeout = commit_timeout_sec
         # Never cancelled while running: aiokafka would release its commit lock and let a retry overtake it.
         self._outstanding_commits: dict[typing.Any, asyncio.Future[typing.Any]] = {}
@@ -162,9 +163,17 @@ class KafkaBatchCommitter:
         if not errors:
             if self._scheduler.retrying:
                 logger.info("Commit to kafka succeeded after transient errors")
+            self._non_retriable_error_reported = False
             return
         for index, exc in enumerate(errors):
-            if index == 0 and not self._scheduler.retrying:
+            if not (exc.retriable or isinstance(exc, KafkaTimeoutError)) and not self._non_retriable_error_reported:
+                self._non_retriable_error_reported = True
+                logger.error(
+                    "Kafka rejected the commit with a non-retriable error, retrying the batch until it is "
+                    "resolved (for example, the consumer group or topic ACLs)",
+                    exc_info=exc,
+                )
+            elif index == 0 and not self._scheduler.retrying:
                 logger.error("Error during commit to kafka, retrying the batch", exc_info=exc)
             else:
                 logger.warning("Commit to kafka still failing, retrying the batch: %r", exc)
