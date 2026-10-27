@@ -450,3 +450,8 @@ async def test_concurrent_full_lifecycle() -> None:
 def test_concurrent_create_rebalance_listener(handler: KafkaConcurrentHandler) -> None:
     listener: typing.Final = handler.create_rebalance_listener()
     assert isinstance(listener, ConsumerRebalanceListener)
+
+
+def test_concurrent_reports_the_committer_stall(handler: KafkaConcurrentHandler) -> None:
+    handler._committer.commit_stall_sec = 42.0  # ty: ignore[invalid-assignment]
+    assert handler.commit_stall_sec == 42.0

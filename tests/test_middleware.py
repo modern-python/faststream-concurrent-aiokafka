@@ -547,6 +547,17 @@ async def test_middleware_initialize_passes_max_uncommitted_tasks(setup_broker: 
             await stop_concurrent_processing(test_broker.context)
 
 
+async def test_middleware_initialize_passes_commit_timeout(setup_broker: KafkaBroker) -> None:
+    async with TestKafkaBroker(setup_broker) as test_broker:
+        handler: typing.Final = await initialize_concurrent_processing(
+            context=test_broker.context, commit_timeout_sec=2.5
+        )
+        try:
+            assert handler._committer._commit_timeout == 2.5
+        finally:
+            await stop_concurrent_processing(test_broker.context)
+
+
 # ---------- _classify: the pure routing decision (no broker / context / consumer plumbing) ----------
 
 

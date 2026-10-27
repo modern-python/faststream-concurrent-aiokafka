@@ -31,6 +31,8 @@ class CommitScheduler:
         cleared by the next round that did not; until it passes, no trigger commits.
       * should_shutdown is set only when a flush fired with a stop request; once
         set, is_finished() returns True as soon as pending drains.
+      * stall_started_at is the time of the first transient error in the current
+        streak; only the round that ends the streak clears it.
     """
 
     def __init__(self, *, commit_batch_size: int, commit_batch_timeout_sec: float) -> None:
@@ -41,10 +43,15 @@ class CommitScheduler:
         self._flush_in_progress: bool = False
         self._retry_attempts: int = 0
         self._retry_not_before: float | None = None
+        self._stall_started_at: float | None = None
 
     @property
     def retrying(self) -> bool:
         return self._retry_attempts > 0
+
+    @property
+    def stall_started_at(self) -> float | None:
+        return self._stall_started_at
 
     def accepts_new_work(self) -> bool:
         # While shutting down, the driver stops pulling new items from the queue.
@@ -119,9 +126,12 @@ class CommitScheduler:
             self._retry_attempts += 1
             delay = consts.COMMIT_RETRY_BACKOFF_BASE_SEC * 2 ** (self._retry_attempts - 1)
             self._retry_not_before = now + min(delay, consts.COMMIT_RETRY_BACKOFF_MAX_SEC)
+            if self._stall_started_at is None:
+                self._stall_started_at = now
         elif committed:
             self._retry_attempts = 0
             self._retry_not_before = None
+            self._stall_started_at = None
 
     def is_finished(self, *, pending_empty: bool) -> bool:
         return self._should_shutdown and pending_empty

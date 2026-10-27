@@ -260,6 +260,7 @@ async def initialize_concurrent_processing(  # noqa: PLR0913, PLR0917
     shutdown_timeout_sec: float = consts.DEFAULT_SHUTDOWN_TIMEOUT_SEC,
     max_uncommitted_tasks: int | None = consts.DEFAULT_MAX_UNCOMMITTED_TASKS,
     rebalance_flush_timeout_sec: float = consts.DEFAULT_REBALANCE_FLUSH_TIMEOUT_SEC,
+    commit_timeout_sec: float | None = consts.DEFAULT_COMMIT_TIMEOUT_SEC,
 ) -> KafkaConcurrentHandler:
     existing: KafkaConcurrentHandler | None = context.get(consts.PROCESSING_CONTEXT_KEY)
     if existing and existing.is_running:
@@ -272,6 +273,7 @@ async def initialize_concurrent_processing(  # noqa: PLR0913, PLR0917
             commit_batch_size=commit_batch_size,
             shutdown_timeout_sec=shutdown_timeout_sec,
             max_uncommitted_tasks=max_uncommitted_tasks,
+            commit_timeout_sec=commit_timeout_sec,
         ),
         concurrency_limit=concurrency_limit,
     )

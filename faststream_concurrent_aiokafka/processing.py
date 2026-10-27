@@ -176,3 +176,7 @@ class KafkaConcurrentHandler:
     @property
     def is_running(self) -> bool:
         return self._is_running
+
+    @property
+    def commit_stall_sec(self) -> float:
+        return self._committer.commit_stall_sec

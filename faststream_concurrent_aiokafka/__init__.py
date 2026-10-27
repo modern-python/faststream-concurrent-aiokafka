@@ -1,4 +1,4 @@
-from faststream_concurrent_aiokafka.healthcheck import is_kafka_handler_healthy
+from faststream_concurrent_aiokafka.healthcheck import is_kafka_commit_stalled, is_kafka_handler_healthy
 from faststream_concurrent_aiokafka.middleware import (
     KafkaConcurrentProcessingMiddleware,
     initialize_concurrent_processing,
@@ -11,6 +11,7 @@ __all__ = [
     "ConsumerRebalanceListener",
     "KafkaConcurrentProcessingMiddleware",
     "initialize_concurrent_processing",
+    "is_kafka_commit_stalled",
     "is_kafka_handler_healthy",
     "stop_concurrent_processing",
 ]
