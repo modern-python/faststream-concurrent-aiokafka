@@ -31,7 +31,7 @@ By default FastStream processes Kafka messages sequentially, one message at a ti
 - Fast shutdown: cancels in-flight tasks; uncommitted offsets are redelivered on restart (at-least-once)
 - Does not register SIGTERM/SIGINT handlers; stop it from your lifespan.
 - Handler exceptions are logged but do not crash the consumer
-- Health check helper to probe handler status from a `ContextRepo`
+- Health check helpers: one for liveness, one that reports when offset commits have stalled
 
 ## Installation
 
@@ -130,6 +130,7 @@ Create and start the concurrent processing handler; store it in FastStream's con
 | `shutdown_timeout_sec` | `20.0` | Max seconds the batch committer waits for its background task to drain before forcing cancellation |
 | `max_uncommitted_tasks` | `10000` | Max tasks accepted but not yet committed before the consume path blocks (backpressure). `None` disables the bound. |
 | `rebalance_flush_timeout_sec` | `10.0` | Max seconds the attached rebalance listener waits for in-flight tasks when partitions are revoked |
+| `commit_timeout_sec` | `5.0` | Max seconds to wait for one `consumer.commit()` before treating it as a failed attempt and retrying with backoff. `None` waits indefinitely. See [Commit failures and broker outages](#commit-failures-and-broker-outages) |
 
 Returns the `KafkaConcurrentHandler` instance.
 
@@ -141,7 +142,11 @@ Cancel all in-flight tasks, flush completed offsets via the committer, then stop
 
 ### `is_kafka_handler_healthy(context)`
 
-Returns `True` if the `KafkaConcurrentHandler` stored in `context` is running and healthy, `False` otherwise (not initialized, stopped, or committer task dead). Useful for readiness/liveness probes.
+Returns `True` if the `KafkaConcurrentHandler` stored in `context` is running and its committer task is alive, `False` otherwise (not initialized, stopped, or committer task dead). Use it for a liveness probe: `False` means the process can no longer commit offsets and a restart is the fix. It stays `True` during a Kafka outage, because restarting the consumer does not bring the brokers back.
+
+### `is_kafka_commit_stalled(context, threshold_sec=30.0)`
+
+Returns `True` if the running handler's offset commits have been failing for longer than `threshold_sec`, `False` otherwise, including when no handler is running. The clock starts when a commit attempt first fails, which for a call that hangs is `commit_timeout_sec` after it began, and resets on the next successful commit. Use it for alerting or a readiness probe. Keep it out of liveness probes: a stall usually means the brokers or the group coordinator are unreachable, and a restart would only add a rebalance once they return. `KafkaConcurrentHandler.commit_stall_sec` exposes the raw number of seconds (`0.0` while commits succeed).
 
 ### `KafkaConcurrentProcessingMiddleware`
 
@@ -174,6 +179,12 @@ The semaphore blocks new tasks when `concurrency_limit` is reached. The slot is 
 ### Offset committing
 
 Each dispatched task is paired with its Kafka offset and consumer reference and enqueued in `KafkaBatchCommitter`. Once the task completes, the committer groups offsets by partition and calls `consumer.commit(partitions_to_offsets)` with `offset + 1` (Kafka's "next offset to fetch" convention).
+
+### Commit failures and broker outages
+
+aiokafka's `consumer.commit()` retries connection and coordinator errors internally and does not return until a coordinator answers, so during an outage it blocks instead of failing. The committer bounds each call with `commit_timeout_sec`. A call that runs past it counts as a failed attempt, and so does a `KafkaError` the call raises: the offsets stay pending and are retried with exponential backoff (0.1 s, doubling, capped at 2 s) until a commit succeeds. Shutdown and rebalance flushes keep retrying within their own timeouts.
+
+The committer does not cancel a timed-out commit, because cancelling releases aiokafka's commit lock while the request is still in flight; the retry could then land first, and the late request would move the committed offset back. The committer waits for that commit to finish before sending the next one for the same consumer, so at most one commit per consumer is in flight and committed offsets only move forward. A commit still running at shutdown is cancelled once `shutdown_timeout_sec` runs out; its offsets are redelivered on restart.
 
 ### Rebalance handling
 

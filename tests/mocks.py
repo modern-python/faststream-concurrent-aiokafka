@@ -74,6 +74,7 @@ class MockKafkaBatchCommitter:
         self.commit_all = AsyncMock()
         self.clear_cancellation_watermarks = Mock()
         self._healthy = True
+        self.commit_stall_sec = 0.0
 
     @property
     def is_healthy(self) -> bool:

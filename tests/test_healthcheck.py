@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 
-from faststream_concurrent_aiokafka.healthcheck import is_kafka_handler_healthy
+from faststream_concurrent_aiokafka.healthcheck import is_kafka_commit_stalled, is_kafka_handler_healthy
 from faststream_concurrent_aiokafka.middleware import (
     initialize_concurrent_processing,
     stop_concurrent_processing,
@@ -69,3 +69,49 @@ async def test_unhealthy_when_the_committer_died_under_a_running_handler() -> No
             assert is_kafka_handler_healthy(test_broker.context) is False
         finally:
             await stop_concurrent_processing(test_broker.context)
+
+
+def _stalled_handler(stall_sec: float, *, running: bool = True) -> MagicMock:
+    handler: typing.Final = MagicMock()
+    handler.is_running = running
+    handler.commit_stall_sec = stall_sec
+    return handler
+
+
+async def test_not_stalled_when_no_handler_in_context() -> None:
+    broker: typing.Final = KafkaBroker("localhost:9092")
+    async with TestKafkaBroker(broker) as test_broker:
+        assert is_kafka_commit_stalled(test_broker.context) is False
+
+
+async def test_not_stalled_while_a_running_handler_commits() -> None:
+    broker: typing.Final = KafkaBroker("localhost:9092")
+    async with TestKafkaBroker(broker) as test_broker:
+        await initialize_concurrent_processing(context=test_broker.context)
+        try:
+            assert is_kafka_commit_stalled(test_broker.context) is False
+        finally:
+            await stop_concurrent_processing(test_broker.context)
+
+
+async def test_stalled_once_the_stall_passes_the_default_threshold() -> None:
+    broker: typing.Final = KafkaBroker("localhost:9092")
+    async with TestKafkaBroker(broker) as test_broker:
+        test_broker.context.set_global("concurrent_processing", _stalled_handler(29.0))
+        assert is_kafka_commit_stalled(test_broker.context) is False
+        test_broker.context.set_global("concurrent_processing", _stalled_handler(31.0))
+        assert is_kafka_commit_stalled(test_broker.context) is True
+
+
+async def test_stalled_honours_a_custom_threshold() -> None:
+    broker: typing.Final = KafkaBroker("localhost:9092")
+    async with TestKafkaBroker(broker) as test_broker:
+        test_broker.context.set_global("concurrent_processing", _stalled_handler(6.0))
+        assert is_kafka_commit_stalled(test_broker.context, threshold_sec=5.0) is True
+
+
+async def test_not_stalled_when_the_handler_is_stopped() -> None:
+    broker: typing.Final = KafkaBroker("localhost:9092")
+    async with TestKafkaBroker(broker) as test_broker:
+        test_broker.context.set_global("concurrent_processing", _stalled_handler(120.0, running=False))
+        assert is_kafka_commit_stalled(test_broker.context) is False

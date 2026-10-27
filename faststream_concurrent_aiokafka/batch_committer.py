@@ -4,7 +4,7 @@ import dataclasses
 import logging
 import typing
 
-from aiokafka.errors import CommitFailedError, IllegalStateError, KafkaError
+from aiokafka.errors import CommitFailedError, IllegalStateError, KafkaError, KafkaTimeoutError
 from aiokafka.structs import TopicPartition
 
 from faststream_concurrent_aiokafka import _commit_scheduler, _pending_state, consts
@@ -38,6 +38,7 @@ class KafkaBatchCommitter:
         commit_batch_size: int = consts.DEFAULT_COMMIT_BATCH_SIZE,
         shutdown_timeout_sec: float = consts.DEFAULT_SHUTDOWN_TIMEOUT_SEC,
         max_uncommitted_tasks: int | None = consts.DEFAULT_MAX_UNCOMMITTED_TASKS,
+        commit_timeout_sec: float | None = consts.DEFAULT_COMMIT_TIMEOUT_SEC,
     ) -> None:
         self._messages_queue: asyncio.Queue[KafkaCommitTask] = asyncio.Queue()
         self._commit_task: asyncio.Task[typing.Any] | None = None
@@ -52,6 +53,9 @@ class KafkaBatchCommitter:
         self._flush_released: bool = False
 
         self._shutdown_timeout = shutdown_timeout_sec
+        self._commit_timeout = commit_timeout_sec
+        # Never cancelled while running: aiokafka would release its commit lock and let a retry overtake it.
+        self._outstanding_commits: dict[typing.Any, asyncio.Future[typing.Any]] = {}
         # Owns per-partition pending commit tasks, count, and cancellation watermarks.
         self._pending: typing.Final = _pending_state.PendingCommits()
         self._scheduler: typing.Final = _commit_scheduler.CommitScheduler(
@@ -86,6 +90,29 @@ class KafkaBatchCommitter:
             msg: typing.Final = "Committer main task is not running"
             raise CommitterIsDeadError(msg)
 
+    async def _finished_in_time(self, commit: asyncio.Future[typing.Any]) -> bool:
+        await asyncio.wait({commit}, timeout=self._commit_timeout)
+        return commit.done()
+
+    def _commit_timeout_error(self) -> KafkaTimeoutError:
+        return KafkaTimeoutError(f"Kafka commit did not complete within {self._commit_timeout}s")
+
+    async def _commit_in_order(self, consumer: typing.Any, offsets: dict[TopicPartition, int]) -> None:  # noqa: ANN401
+        """Commit ``offsets``, raising KafkaTimeoutError while this or an earlier commit is still running."""
+        outstanding: typing.Final = self._outstanding_commits.get(consumer)
+        if outstanding is not None:
+            if not await self._finished_in_time(outstanding):
+                raise self._commit_timeout_error()
+            del self._outstanding_commits[consumer]
+            # Its outcome is moot (the new offsets are the same or later); retrieve it so asyncio does not log it.
+            if not outstanding.cancelled():
+                outstanding.exception()
+        commit: typing.Final = asyncio.ensure_future(consumer.commit(offsets))
+        if not await self._finished_in_time(commit):
+            self._outstanding_commits[consumer] = commit
+            raise self._commit_timeout_error()
+        commit.result()
+
     async def _call_committer(self, rc: _pending_state.ReadyCommit) -> bool | KafkaError:
         if not rc.offsets:
             return True
@@ -101,7 +128,7 @@ class KafkaBatchCommitter:
         if not offsets:
             return False
         try:
-            await rc.consumer.commit(offsets)
+            await self._commit_in_order(rc.consumer, offsets)
         except (CommitFailedError, IllegalStateError) as exc:
             # Partition no longer assigned (rebalance/revocation) — discard batch, not retryable
             logger.warning("Cannot commit due to partition loss or rebalancing, ignoring batch: %r", exc)
@@ -153,6 +180,8 @@ class KafkaBatchCommitter:
                 await self._streaming_iteration(tasks)
         finally:
             tasks.cancel_outstanding()
+            for commit in self._outstanding_commits.values():
+                commit.cancel()
             self._uncommitted_drained.set()
 
     async def _streaming_iteration(self, tasks: "_LoopTasks") -> None:
@@ -330,3 +359,11 @@ class KafkaBatchCommitter:
     @property
     def is_healthy(self) -> bool:
         return self._commit_task is not None and not self._commit_task.done()
+
+    @property
+    def commit_stall_sec(self) -> float:
+        """Seconds since the first failed commit round in the current streak; 0.0 when commits succeed."""
+        started: typing.Final = self._scheduler.stall_started_at
+        if started is None or self._commit_task is None:
+            return 0.0
+        return self._commit_task.get_loop().time() - started

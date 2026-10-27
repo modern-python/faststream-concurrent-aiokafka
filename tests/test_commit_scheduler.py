@@ -208,3 +208,25 @@ def test_the_commit_scheduler_reads_no_clock_and_touches_no_asyncio() -> None:
         if isinstance(node, (ast.Await, ast.AsyncFunctionDef, ast.AsyncFor, ast.AsyncWith))
     ]
     assert not awaited, f"asynchronous construct in the decider: {awaited}"
+
+
+def test_stall_starts_at_the_first_transient_error_and_holds_through_the_streak() -> None:
+    s = _sched()
+    assert s.stall_started_at is None
+    s.note_committed(now=100.0, committed=True, timeout_fired=False, pending_empty=False, transient_error=True)
+    s.note_committed(now=105.0, committed=True, timeout_fired=False, pending_empty=False, transient_error=True)
+    assert s.stall_started_at == 100.0
+
+
+def test_stall_survives_rounds_that_do_not_commit() -> None:
+    s = _sched()
+    s.note_committed(now=100.0, committed=True, timeout_fired=False, pending_empty=False, transient_error=True)
+    s.note_committed(now=101.0, committed=False, timeout_fired=False, pending_empty=False, transient_error=False)
+    assert s.stall_started_at == 100.0
+
+
+def test_stall_clears_on_the_next_successful_commit() -> None:
+    s = _sched()
+    s.note_committed(now=100.0, committed=True, timeout_fired=False, pending_empty=False, transient_error=True)
+    s.note_committed(now=106.0, committed=True, timeout_fired=False, pending_empty=True, transient_error=False)
+    assert s.stall_started_at is None

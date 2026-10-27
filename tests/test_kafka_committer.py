@@ -7,10 +7,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from aiokafka.errors import CommitFailedError, IllegalStateError, KafkaError
+from aiokafka.errors import CommitFailedError, IllegalStateError, KafkaError, KafkaTimeoutError
 from aiokafka.structs import TopicPartition
 
-from faststream_concurrent_aiokafka import _pending_state
+from faststream_concurrent_aiokafka import _pending_state, consts
 from faststream_concurrent_aiokafka.batch_committer import (
     CommitterIsDeadError,
     KafkaBatchCommitter,
@@ -1719,3 +1719,174 @@ async def test_another_consumer_groups_in_flight_task_does_not_delay_a_commit() 
     assert group_b.commit.call_args.args[0] == {TopicPartition(topic="t", partition=0): 102}
     group_a.commit.assert_not_called()
     await _cancel_all(committer, in_flight)
+
+
+def _ready_commit(consumer: MockAIOKafkaConsumer, offset: int) -> _pending_state.ReadyCommit:
+    task: typing.Final = KafkaCommitTask(
+        asyncio_task=MockAsyncioTask(result="ok"),  # ty: ignore[invalid-argument-type]
+        offset=offset - 1,
+        consumer=consumer,
+        topic_partition=TopicPartition(topic="t", partition=0),
+    )
+    return _pending_state.ReadyCommit(
+        consumer=consumer, offsets={TopicPartition(topic="t", partition=0): offset}, tasks=[task]
+    )
+
+
+def _commit_blocked_until(release: asyncio.Event, events: list[str]) -> typing.Callable[..., typing.Awaitable[None]]:
+    async def commit(offsets: dict[TopicPartition, int]) -> None:
+        offset: typing.Final = next(iter(offsets.values()))
+        events.append(f"start {offset}")
+        if len(events) == 1:
+            await release.wait()
+        events.append(f"done {offset}")
+
+    return commit
+
+
+async def test_a_commit_that_outlives_the_timeout_is_a_transient_error() -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    release: typing.Final = asyncio.Event()
+    consumer.commit.side_effect = _commit_blocked_until(release, [])
+    committer: typing.Final = KafkaBatchCommitter(commit_timeout_sec=0.05)
+
+    result: typing.Final = await committer._call_committer(_ready_commit(consumer, 101))
+
+    assert isinstance(result, KafkaTimeoutError)
+    release.set()
+
+
+async def test_no_second_commit_is_sent_while_one_is_outstanding() -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    release: typing.Final = asyncio.Event()
+    consumer.commit.side_effect = _commit_blocked_until(release, [])
+    committer: typing.Final = KafkaBatchCommitter(commit_timeout_sec=0.05)
+    await committer._call_committer(_ready_commit(consumer, 101))
+
+    result: typing.Final = await committer._call_committer(_ready_commit(consumer, 102))
+
+    assert isinstance(result, KafkaTimeoutError)
+    assert consumer.commit.call_count == 1
+    release.set()
+
+
+async def test_commits_resume_in_order_once_the_outstanding_commit_finishes() -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    release: typing.Final = asyncio.Event()
+    events: typing.Final[list[str]] = []
+    consumer.commit.side_effect = _commit_blocked_until(release, events)
+    committer: typing.Final = KafkaBatchCommitter(commit_timeout_sec=0.05)
+    await committer._call_committer(_ready_commit(consumer, 101))
+    release.set()
+
+    result: typing.Final = await committer._call_committer(_ready_commit(consumer, 102))
+
+    assert result is True
+    assert events == ["start 101", "done 101", "start 102", "done 102"]
+
+
+async def test_commit_all_drains_after_a_commit_outlived_its_timeout(caplog: pytest.LogCaptureFixture) -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    release: typing.Final = asyncio.Event()
+    events: typing.Final[list[str]] = []
+    consumer.commit.side_effect = _commit_blocked_until(release, events)
+    committer: typing.Final = KafkaBatchCommitter(
+        commit_batch_timeout_sec=10.0, commit_batch_size=100, commit_timeout_sec=0.05
+    )
+    committer.spawn()
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+    asyncio.get_running_loop().call_later(0.2, release.set)
+
+    await committer.commit_all(flush_timeout_sec=1.0)
+
+    assert "commit_all flush timed out" not in caplog.text
+    assert events[:2] == ["start 101", "done 101"]
+    await committer.close()
+
+
+async def test_a_commit_timeout_is_logged_as_a_transient_error(caplog: pytest.LogCaptureFixture) -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    release: typing.Final = asyncio.Event()
+    consumer.commit.side_effect = _commit_blocked_until(release, [])
+    committer: typing.Final = KafkaBatchCommitter(
+        commit_batch_timeout_sec=10.0, commit_batch_size=100, commit_timeout_sec=0.05
+    )
+    committer.spawn()
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+    asyncio.get_running_loop().call_later(0.2, release.set)
+
+    with caplog.at_level(logging.ERROR, logger="faststream_concurrent_aiokafka.batch_committer"):
+        await committer.commit_all(flush_timeout_sec=1.0)
+
+    errors: typing.Final = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    exc_info: typing.Final = errors[0].exc_info
+    assert isinstance(exc_info, tuple)
+    assert exc_info[0] is KafkaTimeoutError
+    await committer.close()
+
+
+async def test_commit_timeout_none_waits_for_a_slow_commit() -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    release: typing.Final = asyncio.Event()
+    consumer.commit.side_effect = _commit_blocked_until(release, [])
+    committer: typing.Final = KafkaBatchCommitter(commit_timeout_sec=None)
+    asyncio.get_running_loop().call_later(0.1, release.set)
+
+    result: typing.Final = await committer._call_committer(_ready_commit(consumer, 101))
+
+    assert result is True
+
+
+async def test_close_cancels_a_commit_still_outstanding_at_shutdown() -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = _commit_blocked_until(asyncio.Event(), [])
+    committer: typing.Final = KafkaBatchCommitter(
+        commit_batch_timeout_sec=0.05, commit_batch_size=100, commit_timeout_sec=0.05, shutdown_timeout_sec=0.2
+    )
+    committer.spawn()
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+    await _drive_until(lambda: consumer in committer._outstanding_commits)
+    outstanding: typing.Final = committer._outstanding_commits[consumer]
+
+    await committer.close()
+    await asyncio.sleep(0)
+
+    assert outstanding.cancelled()
+
+
+async def test_commit_stall_sec_is_zero_while_commits_succeed() -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    assert committer.commit_stall_sec == 0.0
+    committer.spawn()
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+
+    await committer.commit_all(flush_timeout_sec=1.0)
+
+    assert committer.commit_stall_sec == 0.0
+    await committer.close()
+
+
+async def test_commit_stall_sec_counts_from_the_first_failure_until_a_commit_succeeds() -> None:
+    consumer: typing.Final = MockAIOKafkaConsumer()
+    consumer.commit.side_effect = KafkaError("outage")
+    committer: typing.Final = KafkaBatchCommitter(commit_batch_timeout_sec=10.0, commit_batch_size=100)
+    committer.spawn()
+    await committer.send_task(_commit_task(consumer, 0, asyncio.create_task(_finishes())))
+    flush: typing.Final = asyncio.create_task(committer.commit_all(flush_timeout_sec=2.0))
+    await _drive_until(lambda: consumer.commit.call_count >= 2)
+    stalled_early: typing.Final = committer.commit_stall_sec
+    await asyncio.sleep(0.2)
+
+    assert stalled_early > 0.0
+    assert committer.commit_stall_sec >= stalled_early + 0.15
+
+    consumer.commit.side_effect = None
+    await flush
+    assert committer.commit_stall_sec == 0.0
+    await committer.close()
+
+
+def test_committer_uses_the_default_commit_timeout() -> None:
+    assert KafkaBatchCommitter()._commit_timeout == consts.DEFAULT_COMMIT_TIMEOUT_SEC
