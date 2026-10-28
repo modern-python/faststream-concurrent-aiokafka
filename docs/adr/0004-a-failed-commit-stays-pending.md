@@ -12,4 +12,5 @@ pending work never looks drained while a commit is outstanding, and nothing re-e
 to wake the loop; retries are spaced by a capped exponential backoff owned by the
 `CommitScheduler`. The rejected alternative was to keep re-queuing and add a retry-not-before
 guard: it patches both symptoms but leaves the root cause, the queue carrying work that was
-already absorbed, in place. ADR-0005 adds a commit timeout so that broker outages reach this path.
+already absorbed, in place. ADR-0005 adds a commit timeout so that broker outages reach this path. ADR-0006 keeps
+non-retriable errors on this path.
