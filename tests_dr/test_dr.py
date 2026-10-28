@@ -384,7 +384,7 @@ async def test_shutdown_during_full_outage_redelivers_on_restart(logs: _LogColle
     broker_stop_error: str | None = None
     try:
         await asyncio.wait_for(broker.stop(), 60)
-    # aiokafka 0.14.0 Fetcher.close() can raise CancelledError when no broker is reachable.
+    # aiokafka 0.14.0 Fetcher.close() can raise CancelledError when no broker is reachable; see #116.
     except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001
         broker_stop_error = repr(exc)
     broker_stop_sec: typing.Final = round(time.monotonic() - t_broker, 1)
