@@ -97,6 +97,8 @@ isort.no-lines-before = ["standard-library", "local-folder"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# pytest's defaults plus tests_dr, which only `just test-dr` runs.
+norecursedirs = ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}", "tests_dr"]
 addopts = "-n auto"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
