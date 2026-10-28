@@ -89,9 +89,16 @@ isort.no-lines-before = ["standard-library", "local-folder"]
     "S101",    # allow asserts
     "PLR2004", # allow magic values in test assertions
 ]
+"tests_dr/**" = [
+    "INP001",  # no __init__.py, so `--cov=.` in test-ci does not count this opt-in suite
+    "S101",    # allow asserts
+    "PLR2004", # allow magic values in test assertions
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# pytest's defaults plus tests_dr, which only `just test-dr` runs.
+norecursedirs = ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}", "tests_dr"]
 addopts = "-n auto"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

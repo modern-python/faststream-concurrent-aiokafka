@@ -12,6 +12,16 @@ test-ci:
 test-branch:
     @just test --cov=. --cov-branch
 
+dr_compose := "docker compose -f tests_dr/compose.yml"
+
+# Opt-in: kills and pauses brokers of a 3-node Redpanda cluster; not part of `test` or CI.
+test-dr *args:
+    #!/usr/bin/env sh
+    set -eu
+    trap '{{ dr_compose }} down --remove-orphans' EXIT
+    {{ dr_compose }} up -d
+    uv run --no-sync pytest tests_dr -o addopts= -p no:randomly {{ args }}
+
 build:
     docker compose build application
 

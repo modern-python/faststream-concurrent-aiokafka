@@ -16,6 +16,10 @@ title. Most of the vocabulary is FastStream's and aiokafka's; only seven terms a
 runs pytest, and tears down. To run one test against an already-running stack,
 `uv run --no-sync pytest tests/test_kafka_committer.py -k <name>`.
 
+`just test-dr` runs the broker-failure suite in `tests_dr/` from the host against a 3-node Redpanda
+cluster. It kills and pauses brokers, takes about four minutes, and runs only on demand, never in CI.
+Run it after changing commit, rebalance, or shutdown behaviour.
+
 ## Architecture
 
 `faststream_concurrent_aiokafka/` is nine short modules; read the ones you are changing. The one

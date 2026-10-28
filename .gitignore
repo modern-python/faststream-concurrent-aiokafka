@@ -15,6 +15,7 @@ __pycache__/*
 htmlcov/
 coverage.xml
 pytest.xml
+tests_dr/results/
 .python-version
 .venv
 dist
