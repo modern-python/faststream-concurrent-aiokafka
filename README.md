@@ -170,17 +170,11 @@ modern_di_faststream.setup_di(app, container=container)  # registered after → 
 
 ### OpenTelemetry
 
-Install `faststream-concurrent-aiokafka[otel]` and use
-`KafkaConcurrentTelemetryMiddleware` in place of FastStream's `KafkaTelemetryMiddleware`.
-Register it after the concurrency middleware. It accepts the same telemetry options and
-keeps the consumer process span open until the task finishes.
-
-```python
-from faststream_concurrent_aiokafka.telemetry import KafkaConcurrentTelemetryMiddleware
-
-broker.add_middleware(KafkaConcurrentProcessingMiddleware)
-broker.add_middleware(KafkaConcurrentTelemetryMiddleware())
-```
+If your application already registers FastStream's `KafkaTelemetryMiddleware` after
+`KafkaConcurrentProcessingMiddleware`, `initialize_concurrent_processing` automatically
+keeps its consumer process spans open through background processing. Initialize in the
+FastStream application lifespan before the broker starts, as shown in the quick start.
+Applications without telemetry can use the base package.
 
 ### Message dispatch
 
