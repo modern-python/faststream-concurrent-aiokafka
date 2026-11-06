@@ -7,12 +7,12 @@ from faststream import BaseMiddleware, ContextRepo
 from faststream._internal.broker.registrator import Registrator
 from faststream._internal.configs.broker import BrokerConfig
 from faststream._internal.types import BrokerMiddleware
-from faststream.kafka.response import KafkaPublishCommand
 from faststream.message import StreamMessage
+from faststream.response import PublishCommand
 
 
-class _ConcurrentTelemetryScope(BaseMiddleware[KafkaPublishCommand]):
-    def __init__(self, scope: BaseMiddleware[KafkaPublishCommand]) -> None:
+class _ConcurrentTelemetryScope(BaseMiddleware[PublishCommand]):
+    def __init__(self, scope: BaseMiddleware[PublishCommand]) -> None:
         super().__init__(scope.msg, context=scope.context)
         self._scope = scope
         self._consume_finished = False
@@ -23,8 +23,8 @@ class _ConcurrentTelemetryScope(BaseMiddleware[KafkaPublishCommand]):
 
     async def publish_scope(
         self,
-        call_next: Callable[[KafkaPublishCommand], Awaitable[Any]],
-        cmd: KafkaPublishCommand,
+        call_next: Callable[[PublishCommand], Awaitable[Any]],
+        cmd: PublishCommand,
     ) -> Any:  # noqa: ANN401
         return await self._scope.publish_scope(call_next, cmd)
 
@@ -53,7 +53,7 @@ class _ConcurrentTelemetryScope(BaseMiddleware[KafkaPublishCommand]):
 
 
 class _ConcurrentTelemetryFactory:
-    def __init__(self, factory: BrokerMiddleware[Any, KafkaPublishCommand]) -> None:
+    def __init__(self, factory: BrokerMiddleware[Any, PublishCommand]) -> None:
         self._factory = factory
 
     def __call__(self, msg: object, /, *, context: ContextRepo) -> _ConcurrentTelemetryScope:
