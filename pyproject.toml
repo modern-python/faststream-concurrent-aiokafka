@@ -42,6 +42,7 @@ Changelog = "https://github.com/modern-python/faststream-concurrent-aiokafka/rel
 
 [dependency-groups]
 dev = [
+    "faststream[otel]",
     "pytest>=8",
     "pytest-cov>=5",
     "pytest-xdist>=3",

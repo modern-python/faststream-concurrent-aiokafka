@@ -274,7 +274,7 @@ async def test_middleware_logs_and_propagates_cancelled_error(
             await test_broker.publish({"id": 1}, topic="cancel-topic")
         assert "Task cancelled during shutdown" in caplog.text
 
-        handler_instance.handle_task = original_handle_task  # ty: ignore[invalid-assignment]
+        handler_instance.handle_task = original_handle_task
         await stop_concurrent_processing(test_broker.context)
 
 
@@ -497,14 +497,14 @@ async def test_middleware_batch_subscriber_rejected(setup_broker: KafkaBroker) -
                 return mock_msg
             return original_get(key, default)
 
-        test_broker.context.get = mock_get  # ty: ignore[invalid-assignment]
+        test_broker.context.get = mock_get
         middleware = KafkaConcurrentProcessingMiddleware(MagicMock(), context=test_broker.context)
         middleware.msg = ({"a": 1}, {"b": 2})
         try:
             with pytest.raises(RuntimeError, match="does not support batch subscribers"):
                 await middleware.consume_scope(AsyncMock(), mock_msg)
         finally:
-            test_broker.context.get = original_get  # ty: ignore[invalid-assignment]
+            test_broker.context.get = original_get
 
         await asyncio.sleep(0)
         await stop_concurrent_processing(test_broker.context)
