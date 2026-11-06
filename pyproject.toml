@@ -34,6 +34,9 @@ dependencies = [
     "faststream[kafka]>=0.7.1,<0.8",
 ]
 
+[project.optional-dependencies]
+otel = ["faststream[otel]>=0.7.8,<0.8"]
+
 [project.urls]
 Homepage = "https://modern-python.org"
 Repository = "https://github.com/modern-python/faststream-concurrent-aiokafka"
@@ -42,6 +45,7 @@ Changelog = "https://github.com/modern-python/faststream-concurrent-aiokafka/rel
 
 [dependency-groups]
 dev = [
+    "faststream[otel]>=0.7.8,<0.8",
     "pytest>=8",
     "pytest-cov>=5",
     "pytest-xdist>=3",

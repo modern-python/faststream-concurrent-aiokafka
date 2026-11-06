@@ -152,7 +152,7 @@ Returns `True` if the running handler's offset commits have been failing for lon
 
 FastStream middleware class. Register it via `broker.add_middleware(...)`. See [Quick start](#quick-start) for usage examples.
 
-> This middleware must be the outermost one. `consume_scope` fires the handler as a background task and returns `None` immediately, so any middleware that wraps it on the outside sees that premature return and misfires: wrong timing, early cleanup, or missed exceptions. Middlewares added after it (inner in the chain) run correctly inside the background task.
+> This middleware must be the outermost one. `consume_scope` fires the handler as a background task and returns `None` immediately, so any middleware that wraps it on the outside sees that premature return and misfires: wrong timing, early cleanup, or missed exceptions. The `consume_scope` of a middleware registered after it runs inside the background task. FastStream still controls the timing of `after_processed`.
 
 #### DI framework compatibility (`modern-di-faststream` and similar)
 
@@ -167,6 +167,20 @@ modern_di_faststream.setup_di(app, container=container)  # registered after → 
 ```
 
 ## How it works
+
+### OpenTelemetry
+
+Install `faststream-concurrent-aiokafka[otel]` and use
+`KafkaConcurrentTelemetryMiddleware` in place of FastStream's `KafkaTelemetryMiddleware`.
+Register it after the concurrency middleware. It accepts the same telemetry options and
+keeps the consumer process span open until the task finishes.
+
+```python
+from faststream_concurrent_aiokafka.telemetry import KafkaConcurrentTelemetryMiddleware
+
+broker.add_middleware(KafkaConcurrentProcessingMiddleware)
+broker.add_middleware(KafkaConcurrentTelemetryMiddleware())
+```
 
 ### Message dispatch
 
