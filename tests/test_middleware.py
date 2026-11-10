@@ -764,10 +764,10 @@ async def test_middleware_guard_raises_without_await(setup_broker: KafkaBroker) 
 
     # No await: a coroutine-returning guard would merely warn here instead of raising.
     with pytest.raises(RuntimeError, match="ack"):
-        guarded.ack()  # ty: ignore[unresolved-attribute]
+        guarded.ack()  # ty: ignore[missing-attribute]
     # And it raises through an await too, since the call raises before the await happens.
     with pytest.raises(RuntimeError, match="ack"):
-        await guarded.ack()  # ty: ignore[unresolved-attribute]
+        await guarded.ack()  # ty: ignore[missing-attribute]
 
 
 async def test_middleware_does_not_guard_fake_consumer_passthrough(setup_broker: KafkaBroker) -> None:

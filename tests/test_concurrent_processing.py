@@ -252,7 +252,7 @@ async def test_concurrent_handle_task_dispatches(
     await handler.handle_task(coro(), sample_record, sample_message)  # ty: ignore[invalid-argument-type]
 
     assert len(handler._tracked_tasks) == 1
-    sent_commit_task: typing.Final = handler._committer.send_task.call_args[0][0]  # ty: ignore[unresolved-attribute]
+    sent_commit_task: typing.Final = handler._committer.send_task.call_args[0][0]  # ty: ignore[missing-attribute]
     assert isinstance(sent_commit_task.asyncio_task, asyncio.Task)
     assert len(sent_commit_task.asyncio_task._callbacks) > 0
 
@@ -275,7 +275,7 @@ async def test_commit_task_partition_is_the_type_the_client_library_commits(
 
     await handler.handle_task(coro(), sample_record, sample_message)  # ty: ignore[invalid-argument-type]
 
-    sent_commit_task: typing.Final = handler._committer.send_task.call_args[0][0]  # ty: ignore[unresolved-attribute]
+    sent_commit_task: typing.Final = handler._committer.send_task.call_args[0][0]  # ty: ignore[missing-attribute]
     assert commit_structure_validate({sent_commit_task.topic_partition: 0})
 
 
@@ -299,14 +299,14 @@ async def test_concurrent_sends_to_committer_when_enabled(
         return "result"
 
     await handler.handle_task(coro(), sample_record, sample_message)  # ty: ignore[invalid-argument-type]
-    handler._committer.send_task.assert_called_once()  # ty: ignore[unresolved-attribute]
+    handler._committer.send_task.assert_called_once()  # ty: ignore[missing-attribute]
 
 
 async def test_concurrent_handles_committer_dead_error(
     handler: KafkaConcurrentHandler, sample_message: MockKafkaMessage, sample_record: MockConsumerRecord
 ) -> None:
     await handler.start()
-    handler._committer.send_task.side_effect = CommitterIsDeadError("Dead")  # ty: ignore[unresolved-attribute]
+    handler._committer.send_task.side_effect = CommitterIsDeadError("Dead")  # ty: ignore[missing-attribute]
 
     with pytest.raises(CommitterIsDeadError):
         await handler.handle_task(asyncio.sleep(0), sample_record, sample_message)  # ty: ignore[invalid-argument-type]
@@ -322,7 +322,7 @@ async def test_concurrent_start_sets_running(handler: KafkaConcurrentHandler) ->
 
 async def test_concurrent_start_creates_committer_when_enabled(handler: KafkaConcurrentHandler) -> None:
     await handler.start()
-    handler._committer.spawn.assert_called_once()  # ty: ignore[unresolved-attribute]
+    handler._committer.spawn.assert_called_once()  # ty: ignore[missing-attribute]
     assert handler.is_healthy
 
 
@@ -346,7 +346,7 @@ async def test_concurrent_stop_base(handler: KafkaConcurrentHandler) -> None:
 async def test_concurrent_stop_closes_committer(handler: KafkaConcurrentHandler) -> None:
     await handler.start()
     await handler.stop()
-    handler._committer.close.assert_called_once()  # ty: ignore[unresolved-attribute]
+    handler._committer.close.assert_called_once()  # ty: ignore[missing-attribute]
 
 
 async def test_concurrent_stop_when_not_running(
