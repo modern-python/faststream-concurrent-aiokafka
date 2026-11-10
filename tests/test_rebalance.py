@@ -33,7 +33,7 @@ async def test_rebalance_on_partitions_revoked_calls_commit_all(
 async def test_rebalance_on_partitions_assigned_is_noop(
     listener: ConsumerRebalanceListener, committer: MockKafkaBatchCommitter
 ) -> None:
-    await listener.on_partitions_assigned(set())
+    await listener.on_partitions_assigned(assigned=set())
     committer.commit_all.assert_not_called()
 
 

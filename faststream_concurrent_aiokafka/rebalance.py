@@ -67,7 +67,7 @@ class ConsumerRebalanceListener(BaseConsumerRebalanceListener):
     def _resolve_committer(self) -> KafkaBatchCommitter | None:
         return self._committer
 
-    async def on_partitions_assigned(self, _assigned: object) -> None:  # ty: ignore[invalid-method-override]
+    async def on_partitions_assigned(self, assigned: object) -> None:
         pass
 
     async def on_partitions_revoked(self, revoked: object) -> None:
@@ -97,7 +97,7 @@ class _ContextConsumerRebalanceListener(ConsumerRebalanceListener):
             return None
         return handler.committer
 
-    async def on_partitions_assigned(self, assigned: object) -> None:  # ty: ignore[invalid-method-override]
+    async def on_partitions_assigned(self, assigned: object) -> None:
         if self._chained is not None:
             await _call_or_await(self._chained.on_partitions_assigned(assigned))
 

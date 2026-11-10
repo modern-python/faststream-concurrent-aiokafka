@@ -121,7 +121,7 @@ async def test_a_user_listener_is_kept_and_still_called(*, is_async: bool) -> No
     try:
         handler.committer.commit_all = AsyncMock()
         await subscriber._listener.on_partitions_revoked(partitions)
-        await subscriber._listener.on_partitions_assigned(partitions)
+        await subscriber._listener.on_partitions_assigned(assigned=partitions)
     finally:
         await stop_concurrent_processing(broker.context)
 

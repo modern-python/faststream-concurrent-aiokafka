@@ -1355,9 +1355,11 @@ async def test_send_task_unbounded_when_ceiling_is_none() -> None:
             timeout=1.0,
         )  # never blocks
 
-    committer._commit_task.cancel()  # ty: ignore[unresolved-attribute]
+    commit_task: typing.Final = committer._commit_task
+    assert commit_task is not None
+    commit_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
-        await committer._commit_task  # ty: ignore[invalid-await]
+        await commit_task
 
 
 async def test_send_task_unblocks_with_dead_committer_error() -> None:
@@ -1399,9 +1401,11 @@ async def test_send_task_unblocks_with_dead_committer_error() -> None:
     await asyncio.sleep(0.05)
     assert not blocked.done()
 
-    committer._commit_task.cancel()  # ty: ignore[unresolved-attribute]
+    commit_task: typing.Final = committer._commit_task
+    assert commit_task is not None
+    commit_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
-        await committer._commit_task  # ty: ignore[invalid-await]
+        await commit_task
 
     with pytest.raises(CommitterIsDeadError):
         await asyncio.wait_for(blocked, timeout=1.0)
