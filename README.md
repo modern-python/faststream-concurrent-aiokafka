@@ -287,6 +287,8 @@ Do not do it.
 - [PyPI](https://pypi.org/project/faststream-concurrent-aiokafka)
 - [License](https://github.com/modern-python/faststream-concurrent-aiokafka/blob/main/LICENSE)
 
+If this project saves you time, consider giving it a star on GitHub.
+
 ## Part of `modern-python`
 
 Browse the full list of templates and libraries in
